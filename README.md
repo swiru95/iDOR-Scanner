@@ -1,5 +1,5 @@
 # iDOR-Scanner
-Repository that assumes to help with iDORs supported by AI.
+Repository that aims to help with iDOR detection supported by AI.
 
 ## Autonomous scanner
 
@@ -15,6 +15,12 @@ Run:
 
 ```bash
 python idor_scanner.py --config /absolute/path/to/config.json
+```
+
+Relative paths also work, for example:
+
+```bash
+python idor_scanner.py --config config.json
 ```
 
 Minimal config example:

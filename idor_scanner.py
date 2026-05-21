@@ -11,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+TEMPLATE_PATTERN = r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}"
+
 
 @dataclass
 class HTTPResult:
@@ -97,7 +99,7 @@ def _lookup_context_value(context: Dict[str, Any], key: str) -> str:
 
 def render_template(value: Any, context: Dict[str, Any]) -> Any:
     if isinstance(value, str):
-        return re.sub(r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}", lambda m: _lookup_context_value(context, m.group(1)), value)
+        return re.sub(TEMPLATE_PATTERN, lambda m: _lookup_context_value(context, m.group(1)), value)
     if isinstance(value, dict):
         return {k: render_template(v, context) for k, v in value.items()}
     if isinstance(value, list):
@@ -153,7 +155,7 @@ def evaluate_test_results(test_name: str, user_results: Dict[str, HTTPResult], e
         if violations:
             finding = "possible_idor_or_authz_misconfiguration"
             risk = "high"
-        notes = violations
+        notes = list(violations)
     else:
         statuses = {r.status for r in user_results.values()}
         hashes = {r.body_hash for r in user_results.values()}
