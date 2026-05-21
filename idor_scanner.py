@@ -8,6 +8,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -237,9 +238,98 @@ def maybe_generate_llm_summary(config: Dict[str, Any], report: Dict[str, Any]) -
         return None
 
 
+def _ensure_url(value: str) -> str:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    if not parsed.netloc:
+        return ""
+    scheme = parsed.scheme or "https"
+    path = parsed.path or ""
+    return f"{scheme}://{parsed.netloc}{path}"
+
+
+def _extract_prompt_instruction(prompt: str) -> Dict[str, Any]:
+    lowered = prompt.lower()
+    login_match = re.search(r"go to\s+([a-zA-Z0-9\.\-/:_]+)", lowered)
+    app_match = re.search(r"obtain token for\s+([a-zA-Z0-9\.\-/:_]+)", lowered)
+    users_match = re.search(r"use these\s+(\d+)\s+users", lowered)
+
+    return {
+        "login_target": _ensure_url(login_match.group(1)) if login_match else "",
+        "app_target": _ensure_url(app_match.group(1)) if app_match else "",
+        "users_count": int(users_match.group(1)) if users_match else None,
+    }
+
+
+def _build_login_sequence_from_prompt(login_target: str, app_target: str) -> List[Dict[str, Any]]:
+    if not login_target:
+        return []
+    parsed = urlparse(login_target)
+    default_login_url = f"{parsed.scheme}://{parsed.netloc}/login"
+    return [
+        {
+            "request": {
+                "method": "POST",
+                "url": default_login_url,
+                "json": {
+                    "username": "{{username}}",
+                    "password": "{{password}}",
+                    "audience": app_target,
+                },
+            },
+            "extract": {
+                "access_token": {"from": "json", "path": "token"},
+            },
+        }
+    ]
+
+
+def _build_authorization_tests_from_burp_history(history_requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    tests: List[Dict[str, Any]] = []
+    for index, request_spec in enumerate(history_requests, start=1):
+        request_copy = copy.deepcopy(request_spec)
+        headers = request_copy.setdefault("headers", {})
+        if "Authorization" not in headers:
+            headers["Authorization"] = "Bearer {{access_token}}"
+        tests.append(
+            {
+                "name": f"burp-history-{index}",
+                "request": request_copy,
+            }
+        )
+    return tests
+
+
+def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
+    prompt = str(config.get("instruction_prompt", "")).strip()
+    if not prompt:
+        return config
+
+    inferred = _extract_prompt_instruction(prompt)
+    users = config.get("users", [])
+    expected_count = inferred.get("users_count")
+    if expected_count is not None and expected_count != len(users):
+        raise ValueError(
+            f"instruction_prompt expects {expected_count} users but config provides {len(users)} users"
+        )
+
+    if not config.get("login_sequence"):
+        config["login_sequence"] = _build_login_sequence_from_prompt(
+            inferred.get("login_target", ""),
+            inferred.get("app_target", ""),
+        )
+
+    if not config.get("authorization_tests"):
+        history_requests = config.get("burp_history_requests", [])
+        if history_requests:
+            config["authorization_tests"] = _build_authorization_tests_from_burp_history(history_requests)
+
+    return config
+
+
 def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        config = json.load(f)
+    return apply_prompt_instruction_defaults(config)
 
 
 def choose_executor(config: Dict[str, Any]) -> RequestExecutor:
@@ -266,10 +356,14 @@ def generate_report(config: Dict[str, Any]) -> Dict[str, Any]:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Autonomous iDOR scanner for multi-user authorization checks")
     parser.add_argument("--config", required=True, help="Path to JSON configuration")
+    parser.add_argument("--instruction", help="Optional natural-language instruction prompt")
     parser.add_argument("--output", help="Optional output file path for report JSON")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
+    if args.instruction:
+        config["instruction_prompt"] = args.instruction
+        config = apply_prompt_instruction_defaults(config)
     report = generate_report(config)
 
     rendered = json.dumps(report, indent=2)

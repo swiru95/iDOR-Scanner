@@ -2,6 +2,7 @@ import unittest
 
 from idor_scanner import (
     HTTPResult,
+    apply_prompt_instruction_defaults,
     authenticate_users,
     evaluate_test_results,
     extract_value,
@@ -110,6 +111,39 @@ class TestIDORScannerHelpers(unittest.TestCase):
         self.assertEqual(findings[0]["details"]["bob"]["status"], 403)
         self.assertEqual(executor.calls[2]["headers"]["Authorization"], "Bearer t-alice")
         self.assertEqual(executor.calls[3]["headers"]["Authorization"], "Bearer t-bob")
+
+    def test_apply_prompt_instruction_defaults_derives_login_and_tests(self):
+        config = {
+            "instruction_prompt": (
+                "Hi, go to login.example.com and use username/password to obtain token for app.example.com, "
+                "use these 2 users to test given in burp history requests"
+            ),
+            "users": [
+                {"name": "alice", "variables": {"username": "alice", "password": "a-pass"}},
+                {"name": "bob", "variables": {"username": "bob", "password": "b-pass"}},
+            ],
+            "burp_history_requests": [
+                {"method": "GET", "url": "https://app.example.com/api/account/1"},
+                {"method": "GET", "url": "https://app.example.com/api/account/2"},
+            ],
+        }
+        rendered = apply_prompt_instruction_defaults(config)
+
+        self.assertEqual(rendered["login_sequence"][0]["request"]["url"], "https://login.example.com/login")
+        self.assertEqual(rendered["login_sequence"][0]["request"]["json"]["audience"], "https://app.example.com")
+        self.assertEqual(len(rendered["authorization_tests"]), 2)
+        self.assertEqual(
+            rendered["authorization_tests"][0]["request"]["headers"]["Authorization"],
+            "Bearer {{access_token}}",
+        )
+
+    def test_apply_prompt_instruction_defaults_rejects_user_count_mismatch(self):
+        config = {
+            "instruction_prompt": "go to login.example.com obtain token for app.example.com use these 3 users",
+            "users": [{"name": "only-one", "variables": {}}],
+        }
+        with self.assertRaises(ValueError):
+            apply_prompt_instruction_defaults(config)
 
 
 if __name__ == "__main__":

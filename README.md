@@ -6,6 +6,7 @@ Repository that aims to help with iDOR detection supported by AI.
 This repository now includes an autonomous CLI scanner:
 
 - consumes a JSON configuration that describes a login/authentication sequence,
+- can derive the initial login sequence from a natural-language instruction prompt,
 - authenticates **N users** and extracts tokens from responses,
 - executes authorization test requests (direct HTTP or via `burp_mcp_url`),
 - compares response status/body patterns and reports potential iDOR findings,
@@ -22,6 +23,18 @@ Relative paths also work, for example:
 ```bash
 python idor_scanner.py --config config.json
 ```
+
+Prompt override is also supported:
+
+```bash
+python idor_scanner.py --config config.json --instruction "go to login.example.com and obtain token for app.example.com use these 3 users"
+```
+
+### Prompt-driven defaults
+
+If `instruction_prompt` is present and `login_sequence` is missing, the scanner derives a login step automatically.
+If `authorization_tests` is missing and `burp_history_requests` is provided, tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
+If the prompt declares `use these N users`, the scanner validates that the config contains exactly `N` users.
 
 Minimal config example:
 
@@ -58,6 +71,23 @@ Minimal config example:
         "allowed_users": ["alice"]
       }
     }
+  ]
+}
+```
+
+Instruction-based config example:
+
+```json
+{
+  "instruction_prompt": "Hi, go to login.example.com and use username/password to obtain token for app.example.com, use these 3 users to test given in burp history requests",
+  "users": [
+    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
+    {"name": "bob", "variables": {"username": "bob", "password": "bob-pass"}},
+    {"name": "carol", "variables": {"username": "carol", "password": "carol-pass"}}
+  ],
+  "burp_history_requests": [
+    {"method": "GET", "url": "https://app.example.com/api/profile/100"},
+    {"method": "GET", "url": "https://app.example.com/api/profile/101"}
   ]
 }
 ```
