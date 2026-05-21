@@ -33,8 +33,10 @@ python idor_scanner.py --config config.json --instruction "go to login.example.c
 ### Prompt-driven defaults
 
 If `instruction_prompt` is present and `login_sequence` is missing, the scanner derives a login step automatically.
-If `authorization_tests` is missing and `burp_history_requests` is provided, tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
+If `authorization_tests` is missing and `openapi_spec` or `openapi_spec_path` is provided, tests are derived from OpenAPI operations first.
+If `authorization_tests` is missing and no OpenAPI source is provided, `burp_history_requests` (or `burp_mcp_history_requests`) is used and tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
 If the prompt declares `use these N users`, the scanner validates that the config contains exactly `N` users.
+If the prompt includes `verify all requests from burp MCP history`, history requests must be provided.
 
 Minimal config example:
 
@@ -89,5 +91,18 @@ Instruction-based config example:
     {"method": "GET", "url": "https://app.example.com/api/profile/100"},
     {"method": "GET", "url": "https://app.example.com/api/profile/101"}
   ]
+}
+```
+
+OpenAPI-based config example:
+
+```json
+{
+  "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 2 users",
+  "users": [
+    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
+    {"name": "bob", "variables": {"username": "bob", "password": "bob-pass"}}
+  ],
+  "openapi_spec_path": "/absolute/path/to/openapi.json"
 }
 ```

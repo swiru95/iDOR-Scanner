@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 TEMPLATE_PATTERN = r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}"
+OPENAPI_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
 
 @dataclass
@@ -252,11 +253,13 @@ def _extract_prompt_instruction(prompt: str) -> Dict[str, Any]:
     login_match = re.search(r"go to\s+([a-zA-Z0-9\.\-/:_]+)", lowered)
     app_match = re.search(r"obtain token for\s+([a-zA-Z0-9\.\-/:_]+)", lowered)
     users_match = re.search(r"use these\s+(\d+)\s+users", lowered)
+    verify_all_burp_history = bool(re.search(r"verify all requests.*burp(\s+mcp)? history", lowered))
 
     return {
         "login_target": _ensure_url(login_match.group(1)) if login_match else "",
         "app_target": _ensure_url(app_match.group(1)) if app_match else "",
         "users_count": int(users_match.group(1)) if users_match else None,
+        "verify_all_burp_history": verify_all_burp_history,
     }
 
 
@@ -299,6 +302,63 @@ def _build_authorization_tests_from_burp_history(history_requests: List[Dict[str
     return tests
 
 
+def _load_openapi_spec(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    inline_spec = config.get("openapi_spec")
+    if isinstance(inline_spec, dict):
+        return inline_spec
+
+    spec_path = config.get("openapi_spec_path")
+    if not spec_path:
+        return None
+    try:
+        with open(spec_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError as exc:
+        raise ValueError(f"openapi_spec_path does not exist: {spec_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"openapi_spec_path must point to valid JSON: {spec_path}") from exc
+
+
+def _normalize_openapi_request_url(base_url: str, path: str) -> str:
+    normalized_path = re.sub(r"\{[^}]+\}", "1", path)
+    root = (base_url or "").rstrip("/")
+    if not root:
+        return normalized_path
+    return f"{root}{normalized_path}"
+
+
+def _build_authorization_tests_from_openapi(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    base_url = ""
+    servers = spec.get("servers", [])
+    if isinstance(servers, list) and servers:
+        first_server = servers[0]
+        if isinstance(first_server, dict):
+            base_url = str(first_server.get("url", "")).strip()
+
+    tests: List[Dict[str, Any]] = []
+    for path, methods in spec.get("paths", {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, operation in methods.items():
+            if str(method).lower() not in OPENAPI_METHODS:
+                continue
+            operation_id = ""
+            if isinstance(operation, dict):
+                operation_id = str(operation.get("operationId", "")).strip()
+            request_spec: Dict[str, Any] = {
+                "method": str(method).upper(),
+                "url": _normalize_openapi_request_url(base_url, str(path)),
+                "headers": {"Authorization": "Bearer {{access_token}}"},
+            }
+            tests.append(
+                {
+                    "name": operation_id or f"openapi-{str(method).lower()}-{path}",
+                    "request": request_spec,
+                }
+            )
+    return tests
+
+
 def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(config.get("instruction_prompt", "")).strip()
     if not prompt:
@@ -319,9 +379,17 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     if not config.get("authorization_tests"):
-        history_requests = config.get("burp_history_requests", [])
-        if history_requests:
-            config["authorization_tests"] = _build_authorization_tests_from_burp_history(history_requests)
+        openapi_spec = _load_openapi_spec(config)
+        if openapi_spec:
+            config["authorization_tests"] = _build_authorization_tests_from_openapi(openapi_spec)
+        else:
+            history_requests = config.get("burp_history_requests", []) or config.get("burp_mcp_history_requests", [])
+            if history_requests:
+                config["authorization_tests"] = _build_authorization_tests_from_burp_history(history_requests)
+            elif inferred.get("verify_all_burp_history"):
+                raise ValueError(
+                    "instruction_prompt requests Burp MCP history verification but no history requests were provided"
+                )
 
     return config
 

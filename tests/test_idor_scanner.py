@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+import json
 
 from idor_scanner import (
     HTTPResult,
@@ -141,6 +143,63 @@ class TestIDORScannerHelpers(unittest.TestCase):
         config = {
             "instruction_prompt": "go to login.example.com obtain token for app.example.com use these 3 users",
             "users": [{"name": "only-one", "variables": {}}],
+        }
+        with self.assertRaises(ValueError):
+            apply_prompt_instruction_defaults(config)
+
+    def test_apply_prompt_instruction_defaults_derives_tests_from_openapi_spec(self):
+        config = {
+            "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 1 users",
+            "users": [{"name": "alice", "variables": {"username": "alice", "password": "secret"}}],
+            "openapi_spec": {
+                "servers": [{"url": "https://app.example.com"}],
+                "paths": {
+                    "/api/accounts/{id}": {
+                        "get": {"operationId": "getAccount"},
+                        "patch": {},
+                    }
+                },
+            },
+        }
+
+        rendered = apply_prompt_instruction_defaults(config)
+
+        self.assertEqual(len(rendered["authorization_tests"]), 2)
+        self.assertEqual(rendered["authorization_tests"][0]["name"], "getAccount")
+        self.assertEqual(
+            rendered["authorization_tests"][0]["request"]["url"],
+            "https://app.example.com/api/accounts/1",
+        )
+        self.assertEqual(
+            rendered["authorization_tests"][1]["request"]["headers"]["Authorization"],
+            "Bearer {{access_token}}",
+        )
+
+    def test_apply_prompt_instruction_defaults_loads_openapi_spec_from_path(self):
+        spec = {
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/users": {"get": {}}},
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp_file:
+            json.dump(spec, tmp_file)
+            tmp_path = tmp_file.name
+        try:
+            config = {
+                "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 1 users",
+                "users": [{"name": "alice", "variables": {"username": "alice", "password": "secret"}}],
+                "openapi_spec_path": tmp_path,
+            }
+            rendered = apply_prompt_instruction_defaults(config)
+            self.assertEqual(rendered["authorization_tests"][0]["request"]["url"], "https://api.example.com/users")
+        finally:
+            import os
+
+            os.unlink(tmp_path)
+
+    def test_apply_prompt_instruction_defaults_requires_burp_history_when_prompt_demands_it(self):
+        config = {
+            "instruction_prompt": "verify all requests from burp MCP history",
+            "users": [{"name": "alice", "variables": {}}],
         }
         with self.assertRaises(ValueError):
             apply_prompt_instruction_defaults(config)
