@@ -145,7 +145,7 @@ class TestIDORScannerHelpers(unittest.TestCase):
             "instruction_prompt": "go to login.example.com obtain token for app.example.com use these 3 users",
             "users": [{"name": "only-one", "variables": {}}],
         }
-        with self.assertRaisesRegex(ValueError, "expects 3 users but config provides 1 users"):
+        with self.assertRaisesRegex(ValueError, "expects 3 users but config provides 1 user"):
             apply_prompt_instruction_defaults(config)
 
     def test_apply_prompt_instruction_defaults_derives_tests_from_openapi_spec(self):

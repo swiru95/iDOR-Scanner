@@ -371,8 +371,10 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
     users = config.get("users", [])
     expected_count = inferred.get("users_count")
     if expected_count is not None and expected_count != len(users):
+        provided_count = len(users)
+        provided_label = "user" if provided_count == 1 else "users"
         raise ValueError(
-            f"instruction_prompt expects {expected_count} users but config provides {len(users)} users"
+            f"instruction_prompt expects {expected_count} users but config provides {provided_count} {provided_label}"
         )
 
     if not config.get("login_sequence"):
