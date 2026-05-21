@@ -1,6 +1,23 @@
 import unittest
 
-from idor_scanner import HTTPResult, evaluate_test_results, extract_value, render_template
+from idor_scanner import (
+    HTTPResult,
+    authenticate_users,
+    evaluate_test_results,
+    extract_value,
+    render_template,
+    run_authorization_tests,
+)
+
+
+class FakeExecutor:
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def send(self, request_spec):
+        self.calls.append(request_spec)
+        return self.responses[len(self.calls) - 1]
 
 
 class TestIDORScannerHelpers(unittest.TestCase):
@@ -19,6 +36,10 @@ class TestIDORScannerHelpers(unittest.TestCase):
         result = HTTPResult(status=200, headers={}, body='{"data": {"token": "t-123"}}')
         extracted = extract_value(result, {"from": "json", "path": "data.token"})
         self.assertEqual(extracted, "t-123")
+
+    def test_render_template_supports_nested_path(self):
+        rendered = render_template("Bearer {{user.token}}", {"user": {"token": "deep-token"}})
+        self.assertEqual(rendered, "Bearer deep-token")
 
     def test_evaluate_heuristic_detects_identical_success(self):
         findings = evaluate_test_results(
@@ -42,6 +63,53 @@ class TestIDORScannerHelpers(unittest.TestCase):
         )
         self.assertEqual(findings["finding"], "possible_idor_or_authz_misconfiguration")
         self.assertEqual(findings["risk"], "high")
+
+    def test_authenticate_users_and_run_authorization_tests(self):
+        config = {
+            "users": [
+                {"name": "alice", "variables": {"username": "alice", "password": "pa"}},
+                {"name": "bob", "variables": {"username": "bob", "password": "pb"}},
+            ],
+            "login_sequence": [
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://example.test/login",
+                        "json": {"username": "{{username}}", "password": "{{password}}"},
+                    },
+                    "extract": {"access_token": {"from": "json", "path": "token"}},
+                }
+            ],
+            "authorization_tests": [
+                {
+                    "name": "account-read",
+                    "request": {
+                        "method": "GET",
+                        "url": "https://example.test/accounts/100",
+                        "headers": {"Authorization": "Bearer {{access_token}}"},
+                    },
+                }
+            ],
+        }
+        executor = FakeExecutor(
+            [
+                HTTPResult(200, {}, '{"token": "t-alice"}'),
+                HTTPResult(200, {}, '{"token": "t-bob"}'),
+                HTTPResult(200, {}, '{"owner":"alice"}'),
+                HTTPResult(403, {}, "forbidden"),
+            ]
+        )
+
+        user_contexts = authenticate_users(config, executor)
+        findings = run_authorization_tests(config, user_contexts, executor)
+
+        self.assertEqual(user_contexts["alice"]["access_token"], "t-alice")
+        self.assertEqual(user_contexts["bob"]["access_token"], "t-bob")
+        self.assertEqual(findings[0]["test"], "account-read")
+        self.assertEqual(findings[0]["details"]["alice"]["status"], 200)
+        self.assertEqual(findings[0]["details"]["bob"]["status"], 403)
+        self.assertEqual(executor.calls[2]["headers"]["Authorization"], "Bearer t-alice")
+        self.assertEqual(executor.calls[3]["headers"]["Authorization"], "Bearer t-bob")
 
 
 if __name__ == "__main__":

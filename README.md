@@ -14,7 +14,7 @@ This repository now includes an autonomous CLI scanner:
 Run:
 
 ```bash
-python /home/runner/work/iDOR-Scanner/iDOR-Scanner/idor_scanner.py --config /absolute/path/to/config.json
+python idor_scanner.py --config /absolute/path/to/config.json
 ```
 
 Minimal config example:

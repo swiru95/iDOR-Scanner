@@ -86,9 +86,18 @@ def _encode_body(request_spec: Dict[str, Any], headers: Dict[str, str]) -> Optio
     return None
 
 
+def _lookup_context_value(context: Dict[str, Any], key: str) -> str:
+    if key in context:
+        return "" if context[key] is None else str(context[key])
+    if "." not in key:
+        return ""
+    nested = _read_json_path(context, key)
+    return nested
+
+
 def render_template(value: Any, context: Dict[str, Any]) -> Any:
     if isinstance(value, str):
-        return re.sub(r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}", lambda m: str(context.get(m.group(1), "")), value)
+        return re.sub(r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}", lambda m: _lookup_context_value(context, m.group(1)), value)
     if isinstance(value, dict):
         return {k: render_template(v, context) for k, v in value.items()}
     if isinstance(value, list):
