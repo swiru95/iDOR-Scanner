@@ -200,7 +200,7 @@ class TestIDORScannerHelpers(unittest.TestCase):
             "instruction_prompt": "verify all requests from burp MCP history",
             "users": [{"name": "alice", "variables": {}}],
         }
-        with self.assertRaisesRegex(ValueError, "Burp MCP history verification"):
+        with self.assertRaisesRegex(ValueError, "Burp history verification"):
             apply_prompt_instruction_defaults(config)
 
     def test_apply_prompt_instruction_defaults_rejects_dual_openapi_sources(self):

@@ -399,7 +399,7 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
                 config["authorization_tests"] = _build_authorization_tests_from_burp_history(history_requests)
             elif inferred.get("verify_burp_history"):
                 raise ValueError(
-                    "instruction_prompt requests Burp MCP history verification but no history requests were provided"
+                    "instruction_prompt requests Burp history verification but no history requests were provided"
                 )
 
     return config
