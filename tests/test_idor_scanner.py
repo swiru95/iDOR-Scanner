@@ -145,7 +145,7 @@ class TestIDORScannerHelpers(unittest.TestCase):
             "instruction_prompt": "go to login.example.com obtain token for app.example.com use these 3 users",
             "users": [{"name": "only-one", "variables": {}}],
         }
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "expects 3 users but config provides 1 users"):
             apply_prompt_instruction_defaults(config)
 
     def test_apply_prompt_instruction_defaults_derives_tests_from_openapi_spec(self):
@@ -200,8 +200,47 @@ class TestIDORScannerHelpers(unittest.TestCase):
             "instruction_prompt": "verify all requests from burp MCP history",
             "users": [{"name": "alice", "variables": {}}],
         }
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "Burp MCP history verification"):
             apply_prompt_instruction_defaults(config)
+
+    def test_apply_prompt_instruction_defaults_rejects_dual_openapi_sources(self):
+        config = {
+            "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 1 users",
+            "users": [{"name": "alice", "variables": {"username": "alice", "password": "secret"}}],
+            "openapi_spec": {"paths": {"/users": {"get": {}}}},
+            "openapi_spec_path": "/tmp/should-not-be-used.json",
+        }
+        with self.assertRaisesRegex(ValueError, "Provide only one of openapi_spec or openapi_spec_path"):
+            apply_prompt_instruction_defaults(config)
+
+    def test_apply_prompt_instruction_defaults_rejects_dual_burp_history_sources(self):
+        config = {
+            "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 1 users",
+            "users": [{"name": "alice", "variables": {"username": "alice", "password": "secret"}}],
+            "burp_history_requests": [{"method": "GET", "url": "https://app.example.com/a"}],
+            "burp_mcp_history_requests": [{"method": "GET", "url": "https://app.example.com/b"}],
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "Provide only one of burp_history_requests or burp_mcp_history_requests",
+        ):
+            apply_prompt_instruction_defaults(config)
+
+    def test_apply_prompt_instruction_defaults_supports_openapi_path_param_default(self):
+        config = {
+            "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 1 users",
+            "users": [{"name": "alice", "variables": {"username": "alice", "password": "secret"}}],
+            "openapi_path_param_default": "999",
+            "openapi_spec": {
+                "servers": [{"url": "https://app.example.com"}],
+                "paths": {"/users/{userId}/posts/{postId}": {"get": {}}},
+            },
+        }
+        rendered = apply_prompt_instruction_defaults(config)
+        self.assertEqual(
+            rendered["authorization_tests"][0]["request"]["url"],
+            "https://app.example.com/users/999/posts/999",
+        )
 
 
 if __name__ == "__main__":

@@ -304,10 +304,12 @@ def _build_authorization_tests_from_burp_history(history_requests: List[Dict[str
 
 def _load_openapi_spec(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     inline_spec = config.get("openapi_spec")
+    spec_path = config.get("openapi_spec_path")
+    if inline_spec is not None and spec_path:
+        raise ValueError("Provide only one of openapi_spec or openapi_spec_path, not both")
     if isinstance(inline_spec, dict):
         return inline_spec
 
-    spec_path = config.get("openapi_spec_path")
     if not spec_path:
         return None
     try:
@@ -319,15 +321,16 @@ def _load_openapi_spec(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raise ValueError(f"openapi_spec_path must point to valid JSON: {spec_path}") from exc
 
 
-def _normalize_openapi_request_url(base_url: str, path: str) -> str:
-    normalized_path = re.sub(r"\{[^}]+\}", "1", path)
+def _normalize_openapi_request_url(base_url: str, path: str, path_param_default: str) -> str:
+    replacement = path_param_default or "1"
+    normalized_path = re.sub(r"\{[^}]+\}", replacement, path)
     root = (base_url or "").rstrip("/")
     if not root:
         return normalized_path
     return f"{root}{normalized_path}"
 
 
-def _build_authorization_tests_from_openapi(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_authorization_tests_from_openapi(spec: Dict[str, Any], path_param_default: str = "1") -> List[Dict[str, Any]]:
     base_url = ""
     servers = spec.get("servers", [])
     if isinstance(servers, list) and servers:
@@ -347,7 +350,7 @@ def _build_authorization_tests_from_openapi(spec: Dict[str, Any]) -> List[Dict[s
                 operation_id = str(operation.get("operationId", "")).strip()
             request_spec: Dict[str, Any] = {
                 "method": str(method).upper(),
-                "url": _normalize_openapi_request_url(base_url, str(path)),
+                "url": _normalize_openapi_request_url(base_url, str(path), path_param_default),
                 "headers": {"Authorization": "Bearer {{access_token}}"},
             }
             tests.append(
@@ -381,8 +384,16 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
     if not config.get("authorization_tests"):
         openapi_spec = _load_openapi_spec(config)
         if openapi_spec:
-            config["authorization_tests"] = _build_authorization_tests_from_openapi(openapi_spec)
+            path_param_default = str(config.get("openapi_path_param_default", "1"))
+            config["authorization_tests"] = _build_authorization_tests_from_openapi(
+                openapi_spec,
+                path_param_default=path_param_default,
+            )
         else:
+            has_burp_history = "burp_history_requests" in config
+            has_burp_mcp_history = "burp_mcp_history_requests" in config
+            if has_burp_history and has_burp_mcp_history:
+                raise ValueError("Provide only one of burp_history_requests or burp_mcp_history_requests, not both")
             history_requests = config.get("burp_history_requests", []) or config.get("burp_mcp_history_requests", [])
             if history_requests:
                 config["authorization_tests"] = _build_authorization_tests_from_burp_history(history_requests)

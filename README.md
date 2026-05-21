@@ -37,6 +37,8 @@ If `authorization_tests` is missing and `openapi_spec` or `openapi_spec_path` is
 If `authorization_tests` is missing and no OpenAPI source is provided, `burp_history_requests` (or `burp_mcp_history_requests`) is used and tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
 If the prompt declares `use these N users`, the scanner validates that the config contains exactly `N` users.
 If the prompt includes `verify all requests from burp MCP history`, history requests must be provided.
+Use only one OpenAPI source (`openapi_spec` or `openapi_spec_path`) and only one Burp history source (`burp_history_requests` or `burp_mcp_history_requests`).
+OpenAPI path parameters like `/users/{id}` default to `1`; customize with `openapi_path_param_default`.
 
 Minimal config example:
 
