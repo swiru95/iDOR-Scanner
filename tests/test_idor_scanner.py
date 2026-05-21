@@ -1,3 +1,4 @@
+import os
 import unittest
 import tempfile
 import json
@@ -192,8 +193,6 @@ class TestIDORScannerHelpers(unittest.TestCase):
             rendered = apply_prompt_instruction_defaults(config)
             self.assertEqual(rendered["authorization_tests"][0]["request"]["url"], "https://api.example.com/users")
         finally:
-            import os
-
             os.unlink(tmp_path)
 
     def test_apply_prompt_instruction_defaults_requires_burp_history_when_prompt_demands_it(self):

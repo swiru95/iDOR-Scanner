@@ -253,13 +253,13 @@ def _extract_prompt_instruction(prompt: str) -> Dict[str, Any]:
     login_match = re.search(r"go to\s+([a-zA-Z0-9\.\-/:_]+)", lowered)
     app_match = re.search(r"obtain token for\s+([a-zA-Z0-9\.\-/:_]+)", lowered)
     users_match = re.search(r"use these\s+(\d+)\s+users", lowered)
-    verify_all_burp_history = bool(re.search(r"verify all requests.*burp(\s+mcp)? history", lowered))
+    verify_burp_history = bool(re.search(r"verify all requests.*burp(\s+mcp)? history", lowered))
 
     return {
         "login_target": _ensure_url(login_match.group(1)) if login_match else "",
         "app_target": _ensure_url(app_match.group(1)) if app_match else "",
         "users_count": int(users_match.group(1)) if users_match else None,
-        "verify_all_burp_history": verify_all_burp_history,
+        "verify_burp_history": verify_burp_history,
     }
 
 
@@ -386,7 +386,7 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
             history_requests = config.get("burp_history_requests", []) or config.get("burp_mcp_history_requests", [])
             if history_requests:
                 config["authorization_tests"] = _build_authorization_tests_from_burp_history(history_requests)
-            elif inferred.get("verify_all_burp_history"):
+            elif inferred.get("verify_burp_history"):
                 raise ValueError(
                     "instruction_prompt requests Burp MCP history verification but no history requests were provided"
                 )
