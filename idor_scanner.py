@@ -485,6 +485,9 @@ def run_authorization_tests(config: Dict[str, Any], user_contexts: Dict[str, Dic
         )
         finding["request_method"] = test["request"].get("method", "GET").upper()
         finding["request_url"] = test["request"].get("url", "")
+        allowed = test.get("expectations", {}).get("allowed_users")
+        if allowed is not None:
+            finding["allowed_users"] = list(allowed)
         findings.append(finding)
     return findings
 
@@ -528,6 +531,97 @@ def maybe_generate_llm_summary(config: Dict[str, Any], report: Dict[str, Any]) -
             return {"llm_summary_error": "Ollama responded without a 'response' field."}
     except Exception as exc:
         return {"llm_summary_error": str(exc)}
+
+
+_FINDING_ANALYSIS_VERDICTS = frozenset({
+    "confirmed_idor", "likely_idor", "possible_idor", "false_positive", "clean"
+})
+
+
+def _llm_analyze_single_finding(finding: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    model = config.get("ollama_model")
+    base_url = config.get("ollama_url")
+    if not model or not base_url:
+        return None
+
+    ssl_verify = bool(config.get("ollama_ssl_verify", True))
+    ca_bundle_path = str(config.get("ollama_ca_bundle_path", "")).strip()
+
+    user_lines = []
+    for user_name, detail in finding.get("details", {}).items():
+        status = detail.get("status", "?")
+        preview = detail.get("body_preview", "").strip().replace("\n", " ")[:300]
+        user_lines.append(f"  {user_name}: HTTP {status} — {preview}")
+
+    notes_block = "; ".join(finding.get("notes", [])) or "none"
+    allowed_users = finding.get("allowed_users")
+    allowed_block = (
+        f"Expected to allow: {', '.join(allowed_users)}\n"
+        if allowed_users is not None
+        else ""
+    )
+    prompt = (
+        "You are a security analyst reviewing an HTTP authorization test result.\n\n"
+        f"Endpoint: {finding.get('request_method', 'GET')} {finding.get('request_url', '')}\n"
+        f"{allowed_block}"
+        f"Scanner verdict: {finding.get('finding', '')} (risk: {finding.get('risk', '')})\n"
+        f"Scanner notes: {notes_block}\n\n"
+        "Per-user HTTP responses:\n"
+        + "\n".join(user_lines)
+        + "\n\nDoes this show IDOR or broken access control? "
+        "Consider: unauthorized 2xx access, sensitive data from other users in response bodies, "
+        "partial leaks in error responses, suspicious patterns across users.\n\n"
+        'Return JSON only: {"verdict": "confirmed_idor|likely_idor|possible_idor|false_positive|clean", '
+        '"reasoning": "one concise sentence", "confidence": "high|medium|low"}'
+    )
+
+    payload = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0},
+    }).encode("utf-8")
+    ctx = _build_ssl_context(ssl_verify, ca_bundle_path)
+    api_url = base_url.rstrip("/") + "/api/generate"
+
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(api_url, data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                response = json.loads(resp.read().decode("utf-8"))
+            raw = response.get("response", "")
+            sanitized = _sanitize_llm_json(raw)
+            start = sanitized.find("{")
+            end = sanitized.rfind("}")
+            if start == -1 or end == -1:
+                raise ValueError("No JSON object in LLM response")
+            result = json.loads(sanitized[start : end + 1])
+            verdict = result.get("verdict", "")
+            if verdict not in _FINDING_ANALYSIS_VERDICTS:
+                raise ValueError(f"Unexpected verdict value: {verdict!r}")
+            return {
+                "verdict": verdict,
+                "reasoning": str(result.get("reasoning", "")),
+                "confidence": str(result.get("confidence", "low")),
+            }
+        except Exception as exc:
+            last_exc = exc
+
+    return {"verdict": "error", "reasoning": str(last_exc), "confidence": "low"}
+
+
+def llm_analyze_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not config.get("llm_analyze_responses"):
+        return findings
+    if not config.get("ollama_url") or not config.get("ollama_model"):
+        return findings
+    for finding in findings:
+        analysis = _llm_analyze_single_finding(finding, config)
+        if analysis:
+            finding["llm_analysis"] = analysis
+    return findings
 
 
 def _ensure_url(value: str) -> str:
@@ -901,6 +995,7 @@ def generate_report(config: Dict[str, Any]) -> Dict[str, Any]:
     executor = choose_executor(config)
     user_contexts = authenticate_users(config, executor)
     findings = run_authorization_tests(config, user_contexts, executor)
+    findings = llm_analyze_findings(findings, config)
     report = {
         "users_tested": [u["name"] for u in config.get("users", [])],
         "findings": findings,

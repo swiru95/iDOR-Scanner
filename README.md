@@ -60,12 +60,17 @@ flowchart TD
     AUTH["authenticate_users()\nrun login_sequence per user\nextract tokens into per-user context"]
     AUTH --> TESTS["run_authorization_tests()\nall users × all endpoints — concurrent"]
     TESTS --> EVAL["evaluate_test_results()\ndeclarative or heuristic"]
-    EVAL --> REPORT["generate_report()\nJSON + SARIF · exit 1 on HIGH risk"]
+    EVAL --> ANALYZE_SET{llm_analyze_responses\n+ ollama configured?}
+    ANALYZE_SET -- yes --> OLLAMA2(["Ollama\n/api/generate\nper-finding: status + body previews\n→ verdict + reasoning"])
+    OLLAMA2 --> REPORT
+    ANALYZE_SET -- no --> REPORT
+
+    REPORT["generate_report()\nJSON + SARIF · exit 1 on HIGH risk"]
 
     REPORT --> SUM_SET{ollama configured?}
     SUM_SET -- no --> DONE(["done"])
-    SUM_SET -- yes --> OLLAMA2(["Ollama\n/api/generate\nsummarise findings\nflag false positives"])
-    OLLAMA2 --> DONE
+    SUM_SET -- yes --> OLLAMA3(["Ollama\n/api/generate\nsummarise all findings\nflag false positives"])
+    OLLAMA3 --> DONE
 ```
 
 ### Components
@@ -108,7 +113,21 @@ If no `login_sequence` is defined, each user can instead declare static `headers
 
 **Report output**
 
-The JSON report lists all findings with status codes, body hashes, body previews, and risk labels. SARIF output (`--output-sarif`) maps findings to six rules (IDOR-000 through IDOR-005) and emits `error`/`warning`/`note` levels, making results consumable by GitHub Advanced Security and other SARIF-aware tools. The process exits with code `1` if any high-risk finding is present, enabling clean CI gate integration.
+The JSON report lists all findings with status codes, body hashes, body previews, and risk labels. When `expectations.allowed_users` is set, each finding also includes an `allowed_users` field that carries the declared allow-list forward into the report. SARIF output (`--output-sarif`) maps findings to six rules (IDOR-000 through IDOR-005) and emits `error`/`warning`/`note` levels, making results consumable by GitHub Advanced Security and other SARIF-aware tools. The process exits with code `1` if any high-risk finding is present, enabling clean CI gate integration.
+
+**Per-finding LLM response analysis**
+
+When `llm_analyze_responses: true` is set alongside `ollama_url` and `ollama_model`, `llm_analyze_findings()` sends each finding's per-user HTTP statuses and response body previews to Ollama after the test phase completes. The model receives the endpoint, the declared `allowed_users`, the deterministic scanner verdict, and the per-user responses, then returns a structured assessment appended to each finding as `llm_analysis`:
+
+```json
+"llm_analysis": {
+  "verdict": "confirmed_idor",
+  "reasoning": "editor_user and viewer_user received 200 responses for admin-only data.",
+  "confidence": "high"
+}
+```
+
+Possible verdicts: `confirmed_idor`, `likely_idor`, `possible_idor`, `false_positive`, `clean`. The LLM acts as a second opinion — it can spot semantic data leakage in response bodies that status-code comparison misses, while the deterministic layer remains the authoritative source of truth.
 
 **LLM-assisted login sequence generation**
 

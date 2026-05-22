@@ -2,6 +2,7 @@
   "ollama_url": "https://ollama.kscsc.local",
   "ollama_model": "qwen2.5:14b",
   "ollama_ssl_verify": false,
+  "llm_analyze_responses": true,
 
   "instruction_prompt": "Authenticate to the Flask demo app running at http://127.0.0.1:5000. Send a POST request to /auth/login with a JSON body containing the 'username' and 'password' fields. The server responds with JSON — extract the bearer token from the 'token' field in the response and store it as access_token. Use Authorization: Bearer {{access_token}} for all protected endpoints.",
 
