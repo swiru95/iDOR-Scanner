@@ -35,3 +35,17 @@ python idor_scanner.py --config example/flask_idor_demo_config.json
 ```
 
 The expected result is that the scanner reports the two intentional IDOR examples while the other routes follow the declared role expectations.
+
+## Included config variants
+
+- `example/flask_idor_demo_config.json` uses the login flow and extracts tokens from `/auth/login`.
+- `example/flask_idor_demo_config_ollama.json` is the same demo config but also asks for an LLM summary from `http://ollama.kscsc.local` using `llama3.1`.
+- `example/flask_idor_demo_config_tokens_only.json` skips `login_sequence` entirely and uses per-user bearer tokens in `users[].headers`.
+
+Run any variant with:
+
+```bash
+python idor_scanner.py --config /absolute/path/to/example/<config-file>.json
+```
+
+The token-only config uses demo tokens derived from the Flask app's intentionally unsigned local token format, so it is suitable only for this sample target.

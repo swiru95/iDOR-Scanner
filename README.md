@@ -130,10 +130,14 @@ Per-user header example without login sequence:
 }
 ```
 
+A ready-to-run token-only demo config is also included at `example/flask_idor_demo_config_tokens_only.json`.
+
 ## Local Flask example target
 
 A runnable demo target is available in `example/`.
 
 - `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 10 example endpoints, and 2 intentional IDOR flaws.
 - `example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
+- `example/flask_idor_demo_config_ollama.json` adds an Ollama-backed summary using `http://ollama.kscsc.local`.
+- `example/flask_idor_demo_config_tokens_only.json` shows a no-login configuration that uses only per-user bearer tokens.
 - `example/README.md` explains how to run the sample locally.
