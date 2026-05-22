@@ -109,15 +109,14 @@ def render_template(value: Any, context: Dict[str, Any]) -> Any:
     return value
 
 
-def _apply_user_headers(request_spec: Dict[str, Any], user: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+def _apply_user_headers(request_spec: Dict[str, Any], user: Dict[str, Any], context: Dict[str, Any]) -> None:
     user_headers = user.get("headers", {})
     if not isinstance(user_headers, dict) or not user_headers:
-        return request_spec
+        return
     rendered_headers = render_template(copy.deepcopy(user_headers), context)
     request_headers = request_spec.setdefault("headers", {})
     for header_name, header_value in rendered_headers.items():
         request_headers[str(header_name)] = str(header_value)
-    return request_spec
 
 
 def extract_value(result: HTTPResult, rule: Dict[str, str]) -> str:
@@ -199,7 +198,7 @@ def authenticate_users(config: Dict[str, Any], executor: RequestExecutor) -> Dic
         context = {**shared, **user.get("variables", {})}
         for step in sequence:
             request_spec = render_template(copy.deepcopy(step["request"]), context)
-            request_spec = _apply_user_headers(request_spec, user, context)
+            _apply_user_headers(request_spec, user, context)
             result = executor.send(request_spec)
             for target, rule in step.get("extract", {}).items():
                 context[target] = extract_value(result, rule)
@@ -215,7 +214,7 @@ def run_authorization_tests(config: Dict[str, Any], user_contexts: Dict[str, Dic
             user_name = user["name"]
             context = {**user_contexts[user_name], **test.get("variables", {})}
             request_spec = render_template(copy.deepcopy(test["request"]), context)
-            request_spec = _apply_user_headers(request_spec, user, context)
+            _apply_user_headers(request_spec, user, context)
             per_user_results[user_name] = executor.send(request_spec)
         findings.append(
             evaluate_test_results(
@@ -387,7 +386,7 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         provided_count = len(users)
         provided_label = "user" if provided_count == 1 else "users"
         raise ValueError(
-            f"instruction_prompt expects {expected_count} users but config provides {provided_count} {provided_label}"
+            f"instruction_prompt expects {expected_count} users but 'users' field contains {provided_count} {provided_label}"
         )
 
     if not config.get("login_sequence"):

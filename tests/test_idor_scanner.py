@@ -115,7 +115,7 @@ class TestIDORScannerHelpers(unittest.TestCase):
         self.assertEqual(executor.calls[2]["headers"]["Authorization"], "Bearer t-alice")
         self.assertEqual(executor.calls[3]["headers"]["Authorization"], "Bearer t-bob")
 
-    def test_run_authorization_tests_supports_per_user_headers_without_login_sequence(self):
+    def test_authorization_with_per_user_headers_no_login(self):
         config = {
             "users": [
                 {"name": "john", "variables": {}, "headers": {"Authorization": "Bearer X"}},
@@ -179,7 +179,7 @@ class TestIDORScannerHelpers(unittest.TestCase):
             "instruction_prompt": "go to login.example.com obtain token for app.example.com use these 3 users",
             "users": [{"name": "only-one", "variables": {}}],
         }
-        with self.assertRaisesRegex(ValueError, "expects 3 users but config provides 1 user"):
+        with self.assertRaisesRegex(ValueError, "expects 3 users but 'users' field contains 1 user"):
             apply_prompt_instruction_defaults(config)
 
     def test_apply_prompt_instruction_defaults_derives_tests_from_openapi_spec(self):
