@@ -4,8 +4,9 @@ import base64
 import json
 import uuid
 import warnings
+from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 app = Flask(__name__)
 DEMO_WARNING = (
@@ -52,6 +53,39 @@ DOCUMENTS = {
     }
 }
 
+INVOICES = {
+    "invoice-admin-001": {
+        "owner": "admin_user",
+        "amount": 12000,
+        "currency": "USD",
+        "status": "paid",
+    },
+    "invoice-editor-001": {
+        "owner": "editor_user",
+        "amount": 4200,
+        "currency": "USD",
+        "status": "pending",
+    },
+    "invoice-viewer-001": {
+        "owner": "viewer_user",
+        "amount": 120,
+        "currency": "USD",
+        "status": "paid",
+    },
+}
+
+TEAM_MEMBERS = {
+    "team-core": ["admin_user", "editor_user"],
+    "team-viewers": ["viewer_user"],
+}
+
+AUDIT_EVENTS = {
+    "audit-security-001": {
+        "classification": "admin-only",
+        "message": "Root role granted to temporary user.",
+    }
+}
+
 COMMENTS = []
 
 ALL_PERMISSIONS = {
@@ -65,6 +99,8 @@ ALL_PERMISSIONS = {
     "update_project",
     "patch_project_status",
     "delete_project",
+    "get_invoice",
+    "get_team_members",
 }
 
 ROLE_PERMISSIONS = {
@@ -73,6 +109,7 @@ ROLE_PERMISSIONS = {
         "get_profile",
         "get_project",
         "get_project_summary",
+        "get_team_members",
         "create_project",
         "create_comment",
         "update_project",
@@ -82,6 +119,7 @@ ROLE_PERMISSIONS = {
         "get_profile",
         "get_project",
         "get_project_summary",
+        "get_team_members",
     },
 }
 
@@ -134,6 +172,48 @@ def _require_permission(permission: str):
     if permission not in ROLE_PERMISSIONS.get(user["role"], set()):
         return None, _error(403, "forbidden", f"Role '{user['role']}' is not allowed to access '{permission}'.")
     return user, None
+
+
+@app.get("/")
+def index():
+    links = [
+        ("OpenAPI spec", "/openapi.json"),
+        ("Login (POST endpoint)", "/auth/login"),
+        ("Profile", "/api/me/profile"),
+        ("Project (alpha)", "/api/projects/project-alpha"),
+        ("Project Summary (alpha)", "/api/projects/project-alpha/summary"),
+        ("Report (intentional IDOR)", "/api/reports/report-admin-finance"),
+        ("Document (intentional IDOR)", "/api/documents/doc-admin-secret"),
+        ("Invoice (admin)", "/api/invoices/invoice-admin-001"),
+        ("Team Members (core)", "/api/teams/team-core/members"),
+        ("Audit Event (intentional broken access)", "/api/admin/audit-events/audit-security-001"),
+        ("Create Project (POST endpoint)", "/api/projects"),
+        ("Create Comment (POST endpoint)", "/api/projects/project-alpha/comments"),
+        ("Update Project (PUT endpoint)", "/api/projects/project-alpha"),
+        ("Patch Project Status (PATCH endpoint)", "/api/projects/project-alpha/status"),
+        ("Delete Project (DELETE endpoint)", "/api/projects/project-beta"),
+    ]
+    items = "\n".join([f'<li><a href="{href}">{label}</a></li>' for label, href in links])
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'><title>iDOR Demo Index</title></head>"
+        "<body><h1>iDOR Demo Target</h1>"
+        "<p>Use this page as a crawl starting point in Burp. Most endpoints require Authorization and may return 401 without a Bearer token.</p>"
+        "<ul>"
+        f"{items}"
+        "</ul>"
+        "</body></html>"
+    )
+    return Response(html, mimetype="text/html")
+
+
+@app.get("/openapi.json")
+def openapi_spec():
+    spec_path = Path(__file__).with_name("flask_idor_demo_openapi.json")
+    try:
+        content = spec_path.read_text(encoding="utf-8")
+    except OSError:
+        return _error(500, "openapi_unavailable", "OpenAPI spec file is missing from example folder.")
+    return Response(content, mimetype="application/json")
 
 
 @app.post("/auth/login")
@@ -238,6 +318,49 @@ def get_document(document_id: str):
             "warning": "intentional_idor_example",
             "requested_by": user["username"],
             "document": document,
+        }
+    )
+
+
+@app.get("/api/invoices/<invoice_id>")
+def get_invoice(invoice_id: str):
+    user, error = _require_permission("get_invoice")
+    if error:
+        return error
+    invoice = INVOICES.get(invoice_id)
+    if not invoice:
+        return _error(404, "not_found", f"Invoice '{invoice_id}' was not found.")
+    if user["role"] != "admin" and invoice["owner"] != user["username"]:
+        return _error(403, "forbidden", "You can access only your own invoices.")
+    return jsonify({"allowed": True, "requested_by": user["username"], "invoice": invoice})
+
+
+@app.get("/api/teams/<team_id>/members")
+def get_team_members(team_id: str):
+    user, error = _require_permission("get_team_members")
+    if error:
+        return error
+    members = TEAM_MEMBERS.get(team_id)
+    if not members:
+        return _error(404, "not_found", f"Team '{team_id}' was not found.")
+    return jsonify({"allowed": True, "requested_by": user["username"], "team_id": team_id, "members": members})
+
+
+@app.get("/api/admin/audit-events/<event_id>")
+def get_audit_event(event_id: str):
+    # Intentional broken access control: any authenticated user can read admin-only audit events.
+    user, error = _require_authenticated_user()
+    if error:
+        return error
+    event = AUDIT_EVENTS.get(event_id)
+    if not event:
+        return _error(404, "not_found", f"Audit event '{event_id}' was not found.")
+    return jsonify(
+        {
+            "allowed": True,
+            "warning": "intentional_broken_access_control_example",
+            "requested_by": user["username"],
+            "event": event,
         }
     )
 

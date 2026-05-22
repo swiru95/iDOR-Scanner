@@ -123,6 +123,53 @@
       }
     },
     {
+      "name": "invoice-admin-only",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/invoices/invoice-admin-001",
+        "headers": {
+          "Authorization": "Bearer {{access_token}}"
+        }
+      },
+      "expectations": {
+        "allowed_users": [
+          "admin_user"
+        ]
+      }
+    },
+    {
+      "name": "team-members-read",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/teams/team-core/members",
+        "headers": {
+          "Authorization": "Bearer {{access_token}}"
+        }
+      },
+      "expectations": {
+        "allowed_users": [
+          "admin_user",
+          "editor_user",
+          "viewer_user"
+        ]
+      }
+    },
+    {
+      "name": "admin-audit-event-broken-access",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/admin/audit-events/audit-security-001",
+        "headers": {
+          "Authorization": "Bearer {{access_token}}"
+        }
+      },
+      "expectations": {
+        "allowed_users": [
+          "admin_user"
+        ]
+      }
+    },
+    {
       "name": "project-create",
       "request": {
         "method": "POST",

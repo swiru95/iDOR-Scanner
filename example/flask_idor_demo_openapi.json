@@ -1,0 +1,168 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Flask IDOR Demo API",
+    "version": "1.0.0",
+    "description": "OpenAPI spec for the local Flask IDOR/broken-access demo target."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:5000"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "operationId": "login",
+        "summary": "Authenticate user and return token"
+      }
+    },
+    "/api/me/profile": {
+      "get": {
+        "operationId": "getProfile",
+        "summary": "Get current profile",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/projects/{project_id}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Read a project",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "updateProject",
+        "summary": "Update a project",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "deleteProject",
+        "summary": "Delete a project",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/projects/{project_id}/summary": {
+      "get": {
+        "operationId": "getProjectSummary",
+        "summary": "Read a project summary",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/reports/{report_id}": {
+      "get": {
+        "operationId": "getReport",
+        "summary": "Read report (intentional IDOR)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/documents/{document_id}": {
+      "get": {
+        "operationId": "getDocument",
+        "summary": "Read document (intentional IDOR)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/invoices/{invoice_id}": {
+      "get": {
+        "operationId": "getInvoice",
+        "summary": "Read invoice",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/teams/{team_id}/members": {
+      "get": {
+        "operationId": "getTeamMembers",
+        "summary": "Read team members",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/audit-events/{event_id}": {
+      "get": {
+        "operationId": "getAdminAuditEvent",
+        "summary": "Read audit event (intentional broken access)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/projects": {
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create project",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/projects/{project_id}/comments": {
+      "post": {
+        "operationId": "createProjectComment",
+        "summary": "Create comment",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/projects/{project_id}/status": {
+      "patch": {
+        "operationId": "patchProjectStatus",
+        "summary": "Patch project status",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    }
+  }
+}

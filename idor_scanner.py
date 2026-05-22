@@ -1,19 +1,34 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import concurrent.futures
 import copy
 import hashlib
 import json
+import os
 import re
+import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 TEMPLATE_PATTERN = r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}"
 OPENAPI_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+
+
+def _build_ssl_context(verify: bool, ca_bundle_path: str) -> Optional[ssl.SSLContext]:
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    if ca_bundle_path:
+        return ssl.create_default_context(cafile=ca_bundle_path)
+    return None
 
 
 @dataclass
@@ -33,6 +48,10 @@ class RequestExecutor:
 
 
 class DirectHTTPExecutor(RequestExecutor):
+    def __init__(self, timeout_seconds: float = 20.0, ssl_verify: bool = True, ca_bundle_path: str = ""):
+        self.timeout_seconds = timeout_seconds
+        self._ssl_context = _build_ssl_context(ssl_verify, ca_bundle_path)
+
     def send(self, request_spec: Dict[str, Any]) -> HTTPResult:
         method = request_spec.get("method", "GET").upper()
         url = request_spec["url"]
@@ -40,7 +59,7 @@ class DirectHTTPExecutor(RequestExecutor):
         body_data = _encode_body(request_spec, headers)
         req = urllib.request.Request(url=url, data=body_data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout_seconds, context=self._ssl_context) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 return HTTPResult(status=resp.status, headers=dict(resp.headers.items()), body=body)
         except urllib.error.HTTPError as e:
@@ -49,10 +68,184 @@ class DirectHTTPExecutor(RequestExecutor):
 
 
 class BurpMCPExecutor(RequestExecutor):
-    def __init__(self, burp_mcp_url: str):
+    def __init__(self, burp_mcp_url: str, timeout_seconds: float = 20.0):
         self.burp_mcp_url = burp_mcp_url
+        self.timeout_seconds = timeout_seconds
+        self._mode: Optional[str] = None
 
-    def send(self, request_spec: Dict[str, Any]) -> HTTPResult:
+    def _detect_mode(self) -> str:
+        if self._mode:
+            return self._mode
+        try:
+            req = urllib.request.Request(self.burp_mcp_url, method="GET")
+            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                content_type = str(resp.headers.get("Content-Type", "")).lower()
+                if "text/event-stream" in content_type:
+                    self._mode = "mcp_sse"
+                else:
+                    self._mode = "legacy_http"
+        except Exception:
+            self._mode = "legacy_http"
+        return self._mode
+
+    def _post_json(self, url: str, payload_obj: Dict[str, Any]) -> None:
+        payload = json.dumps(payload_obj).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout_seconds):
+            return
+
+    def _extract_sse_post_url(self, sse_resp: Any) -> str:
+        # MCP SSE transport sends an "endpoint" event with relative URL containing sessionId.
+        for _ in range(40):
+            raw = sse_resp.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line.startswith("data:"):
+                endpoint = line.split("data:", 1)[1].strip()
+                if endpoint:
+                    return urljoin(self.burp_mcp_url, endpoint)
+        return self.burp_mcp_url
+
+    def _build_http1_content(self, request_spec: Dict[str, Any]) -> Dict[str, Any]:
+        method = request_spec.get("method", "GET").upper()
+        parsed = urlparse(request_spec["url"])
+        target_hostname = parsed.hostname or ""
+        target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        uses_https = parsed.scheme == "https"
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        headers = {k: str(v) for k, v in request_spec.get("headers", {}).items()}
+        headers.setdefault("Host", parsed.netloc or target_hostname)
+        headers.setdefault("Connection", "close")
+
+        body_data = _encode_body(request_spec, headers)
+        if body_data is not None:
+            headers["Content-Length"] = str(len(body_data))
+
+        start_line = f"{method} {path} HTTP/1.1"
+        header_lines = [f"{k}: {v}" for k, v in headers.items()]
+        raw = "\r\n".join([start_line, *header_lines, "", ""])
+        if body_data is not None:
+            raw += body_data.decode("utf-8", errors="replace")
+
+        return {
+            "targetHostname": target_hostname,
+            "targetPort": target_port,
+            "usesHttps": uses_https,
+            "content": raw,
+        }
+
+    def _parse_http_response_from_text(self, tool_text: str) -> HTTPResult:
+        marker = "httpResponse="
+        start = tool_text.find(marker)
+        if start < 0:
+            return HTTPResult(status=0, headers={}, body=tool_text)
+        response_blob = tool_text[start + len(marker) :]
+        tail = ", messageAnnotations="
+        end = response_blob.find(tail)
+        if end >= 0:
+            response_blob = response_blob[:end]
+
+        header_blob, sep, body = response_blob.partition("\r\n\r\n")
+        if not sep:
+            return HTTPResult(status=0, headers={}, body=response_blob)
+        header_lines = header_blob.split("\r\n")
+        status_line = header_lines[0] if header_lines else ""
+        parts = status_line.split(" ")
+        status = 0
+        if len(parts) > 1 and parts[1].isdigit():
+            status = int(parts[1])
+
+        headers: Dict[str, str] = {}
+        for line in header_lines[1:]:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip()] = value.strip()
+        return HTTPResult(status=status, headers=headers, body=body)
+
+    def _send_via_mcp_sse(self, request_spec: Dict[str, Any]) -> HTTPResult:
+        sse_req = urllib.request.Request(self.burp_mcp_url, method="GET")
+        with urllib.request.urlopen(sse_req, timeout=self.timeout_seconds) as sse_resp:
+            post_url = self._extract_sse_post_url(sse_resp)
+
+            self._post_json(
+                post_url,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "idor-scanner", "version": "1.0"},
+                    },
+                },
+            )
+            self._post_json(
+                post_url,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {},
+                },
+            )
+
+            call_id = 2
+            self._post_json(
+                post_url,
+                {
+                    "jsonrpc": "2.0",
+                    "id": call_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "send_http1_request",
+                        "arguments": self._build_http1_content(request_spec),
+                    },
+                },
+            )
+
+            deadline = time.time() + self.timeout_seconds
+            while time.time() < deadline:
+                raw = sse_resp.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line.split("data:", 1)[1].strip()
+                try:
+                    msg = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("id") != call_id:
+                    continue
+                result = msg.get("result", {})
+                if result.get("isError"):
+                    text_items = result.get("content", [])
+                    text = ""
+                    if text_items and isinstance(text_items[0], dict):
+                        text = str(text_items[0].get("text", ""))
+                    return HTTPResult(status=0, headers={}, body=text or "Burp MCP tools/call returned an error")
+
+                text = ""
+                for item in result.get("content", []):
+                    if isinstance(item, dict) and "text" in item:
+                        text = str(item.get("text", ""))
+                        break
+                return self._parse_http_response_from_text(text)
+
+        return HTTPResult(status=0, headers={}, body="Timed out waiting for Burp MCP response over SSE")
+
+    def _send_via_legacy_http(self, request_spec: Dict[str, Any]) -> HTTPResult:
         payload = json.dumps({"request": request_spec}).encode("utf-8")
         req = urllib.request.Request(
             self.burp_mcp_url,
@@ -61,7 +254,7 @@ class BurpMCPExecutor(RequestExecutor):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
                 response = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             response = json.loads(e.read().decode("utf-8"))
@@ -74,6 +267,12 @@ class BurpMCPExecutor(RequestExecutor):
             headers={k: str(v) for k, v in response.get("headers", {}).items()},
             body=str(body),
         )
+
+    def send(self, request_spec: Dict[str, Any]) -> HTTPResult:
+        mode = self._detect_mode()
+        if mode == "mcp_sse":
+            return self._send_via_mcp_sse(request_spec)
+        return self._send_via_legacy_http(request_spec)
 
 
 def _encode_body(request_spec: Dict[str, Any], headers: Dict[str, str]) -> Optional[bytes]:
@@ -91,6 +290,8 @@ def _encode_body(request_spec: Dict[str, Any], headers: Dict[str, str]) -> Optio
 
 
 def _lookup_context_value(context: Dict[str, Any], key: str) -> str:
+    if key.startswith("env."):
+        return os.environ.get(key[4:], "")
     if key in context:
         return "" if context[key] is None else str(context[key])
     if "." not in key:
@@ -123,11 +324,36 @@ def extract_value(result: HTTPResult, rule: Dict[str, str]) -> str:
     source = rule.get("from", "json")
     if source == "header":
         return result.headers.get(rule["name"], "")
+    if source == "set_cookie":
+        cookie_name = rule.get("name", "")
+        raw = result.headers.get("Set-Cookie", "")
+        for part in raw.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                if k.strip() == cookie_name:
+                    return v.strip()
+        return ""
     if source == "regex":
         match = re.search(rule["pattern"], result.body)
         return match.group(1) if match else ""
-    json_payload = json.loads(result.body or "{}")
+    try:
+        json_payload = json.loads(result.body or "{}")
+    except json.JSONDecodeError:
+        return ""
     return _read_json_path(json_payload, rule.get("path", ""))
+
+
+def _is_success(status: int) -> bool:
+    return 200 <= status < 300
+
+
+def _is_authz_denial(status: int) -> bool:
+    return status in {401, 403}
+
+
+def _is_not_found(status: int) -> bool:
+    return status in {404, 410}
 
 
 def _read_json_path(payload: Any, path: str) -> str:
@@ -147,7 +373,7 @@ def evaluate_test_results(test_name: str, user_results: Dict[str, HTTPResult], e
         user: {
             "status": result.status,
             "body_hash": result.body_hash,
-            "body_preview": result.body[:180],
+            "body_preview": result.body[:500],
         }
         for user, result in user_results.items()
     }
@@ -157,25 +383,48 @@ def evaluate_test_results(test_name: str, user_results: Dict[str, HTTPResult], e
 
     if expectations:
         allowed = set(expectations.get("allowed_users", []))
-        violations = []
+        unauthorized_successes = []
+        expected_denials = []
+        expected_not_found = []
+        expected_other_failures = []
         for user, result in user_results.items():
-            is_success = 200 <= result.status < 300
-            if user in allowed and not is_success:
-                violations.append(f"{user} should be allowed but got {result.status}")
-            if user not in allowed and is_success:
-                violations.append(f"{user} should not be allowed but got {result.status}")
-        if violations:
-            finding = "possible_idor_or_authz_misconfiguration"
+            if user in allowed:
+                if _is_success(result.status):
+                    continue
+                if _is_authz_denial(result.status):
+                    expected_denials.append(f"{user} should be allowed but got {result.status}")
+                elif _is_not_found(result.status):
+                    expected_not_found.append(f"{user} should be allowed but got {result.status}")
+                else:
+                    expected_other_failures.append(f"{user} should be allowed but got {result.status}")
+            elif _is_success(result.status):
+                unauthorized_successes.append(f"{user} should not be allowed but got {result.status}")
+
+        notes = unauthorized_successes + expected_denials + expected_not_found + expected_other_failures
+        if unauthorized_successes or expected_denials:
+            finding = "possible_idor_or_broken_access_control"
             risk = "high"
-        notes = list(violations)
-    else:
-        statuses = {r.status for r in user_results.values()}
-        hashes = {r.body_hash for r in user_results.values()}
-        all_success = all(200 <= r.status < 300 for r in user_results.values())
-        if len(user_results) > 1 and len(statuses) == 1 and len(hashes) == 1 and all_success:
-            finding = "possible_idor_identical_successful_access"
+        elif expected_not_found:
+            finding = "possible_stateful_test_or_missing_fixture"
             risk = "medium"
-            notes = ["All tested users received successful and identical responses."]
+            notes.append("Expected-allowed users received not found responses; verify test data setup and endpoint side effects.")
+        elif expected_other_failures:
+            finding = "unexpected_authorization_or_application_behavior"
+            risk = "medium"
+    else:
+        all_success = all(_is_success(r.status) for r in user_results.values())
+        if all_success and len(user_results) > 1:
+            hashes = {r.body_hash for r in user_results.values()}
+            if len(hashes) == 1:
+                finding = "possible_idor_identical_successful_access"
+                risk = "medium"
+                notes = ["All tested users received successful and identical responses."]
+            else:
+                finding = "possible_cross_user_data_leak"
+                risk = "medium"
+                notes = ["All users got successful responses but with different content; may indicate cross-user data access. Full bodies included for LLM analysis."]
+                for user, result in user_results.items():
+                    details[user]["full_body"] = result.body
         else:
             notes = ["Differences detected or non-success responses observed."]
 
@@ -191,9 +440,9 @@ def evaluate_test_results(test_name: str, user_results: Dict[str, HTTPResult], e
 def authenticate_users(config: Dict[str, Any], executor: RequestExecutor) -> Dict[str, Dict[str, Any]]:
     shared = config.get("shared_variables", {})
     sequence = config.get("login_sequence", [])
-    user_contexts: Dict[str, Dict[str, Any]] = {}
+    max_workers = int(config.get("max_concurrent_requests", 5))
 
-    for user in config.get("users", []):
+    def _login_user(user: Dict[str, Any]) -> tuple:
         user_name = user["name"]
         context = {**shared, **user.get("variables", {})}
         for step in sequence:
@@ -202,35 +451,62 @@ def authenticate_users(config: Dict[str, Any], executor: RequestExecutor) -> Dic
             result = executor.send(request_spec)
             for target, rule in step.get("extract", {}).items():
                 context[target] = extract_value(result, rule)
-        user_contexts[user_name] = context
+        return user_name, context
+
+    user_contexts: Dict[str, Dict[str, Any]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for user_name, context in pool.map(_login_user, config.get("users", [])):
+            user_contexts[user_name] = context
     return user_contexts
 
 
 def run_authorization_tests(config: Dict[str, Any], user_contexts: Dict[str, Dict[str, Any]], executor: RequestExecutor) -> List[Dict[str, Any]]:
     findings = []
+    users = config.get("users", [])
+    max_workers = int(config.get("max_concurrent_requests", 5))
+
     for test in config.get("authorization_tests", []):
-        per_user_results: Dict[str, HTTPResult] = {}
-        for user in config.get("users", []):
+        def _run_for_user(user: Dict[str, Any], _test: Dict[str, Any] = test) -> tuple:
             user_name = user["name"]
-            context = {**user_contexts[user_name], **test.get("variables", {})}
-            request_spec = render_template(copy.deepcopy(test["request"]), context)
+            context = {**user_contexts[user_name], **_test.get("variables", {})}
+            request_spec = render_template(copy.deepcopy(_test["request"]), context)
             _apply_user_headers(request_spec, user, context)
-            per_user_results[user_name] = executor.send(request_spec)
-        findings.append(
-            evaluate_test_results(
-                test_name=test.get("name", "unnamed_test"),
-                user_results=per_user_results,
-                expectations=test.get("expectations"),
-            )
+            return user_name, executor.send(request_spec)
+
+        per_user_results: Dict[str, HTTPResult] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for user_name, result in pool.map(_run_for_user, users):
+                per_user_results[user_name] = result
+
+        finding = evaluate_test_results(
+            test_name=test.get("name", "unnamed_test"),
+            user_results=per_user_results,
+            expectations=test.get("expectations"),
         )
+        finding["request_method"] = test["request"].get("method", "GET").upper()
+        finding["request_url"] = test["request"].get("url", "")
+        findings.append(finding)
     return findings
 
 
-def maybe_generate_llm_summary(config: Dict[str, Any], report: Dict[str, Any]) -> Optional[str]:
+def maybe_generate_llm_summary(config: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, str]:
     model = config.get("ollama_model")
     base_url = config.get("ollama_url")
     if not model or not base_url:
-        return None
+        return {}
+
+    ssl_verify = bool(config.get("ollama_ssl_verify", True))
+    ca_bundle_path = str(config.get("ollama_ca_bundle_path", "")).strip()
+    ssl_context: Optional[ssl.SSLContext] = None
+    if not ssl_verify:
+        ssl_context = _build_ssl_context(False, "")
+    elif ca_bundle_path:
+        if not os.path.isfile(ca_bundle_path):
+            return {"llm_summary_error": f"ollama_ca_bundle_path does not exist: {ca_bundle_path}"}
+        try:
+            ssl_context = ssl.create_default_context(cafile=ca_bundle_path)
+        except Exception as exc:
+            return {"llm_summary_error": f"Failed to load ollama_ca_bundle_path '{ca_bundle_path}': {exc}"}
 
     prompt = (
         "Summarize iDOR scan findings. Focus on authorization anomalies and likely false positives.\n\n"
@@ -244,11 +520,14 @@ def maybe_generate_llm_summary(config: Dict[str, Any], report: Dict[str, Any]) -
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=ssl_context) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data.get("response")
-    except Exception:
-        return None
+            summary = data.get("response")
+            if summary:
+                return {"llm_summary": str(summary)}
+            return {"llm_summary_error": "Ollama responded without a 'response' field."}
+    except Exception as exc:
+        return {"llm_summary_error": str(exc)}
 
 
 def _ensure_url(value: str) -> str:
@@ -333,22 +612,45 @@ def _load_openapi_spec(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raise ValueError(f"openapi_spec_path must point to valid JSON: {spec_path}") from exc
 
 
-def _normalize_openapi_request_url(base_url: str, path: str, path_param_default: str) -> str:
+def _normalize_openapi_request_url(
+    base_url: str,
+    path: str,
+    path_param_default: str,
+    path_param_defaults: Optional[Dict[str, str]] = None,
+) -> str:
     replacement = path_param_default or "1"
-    normalized_path = re.sub(r"\{[^}]+\}", replacement, path)
+    named_defaults = path_param_defaults or {}
+
+    def _resolve_param(match: re.Match[str]) -> str:
+        param_name = match.group(1)
+        return str(named_defaults.get(param_name, replacement))
+
+    normalized_path = re.sub(r"\{([^}]+)\}", _resolve_param, path)
     root = (base_url or "").rstrip("/")
     if not root:
         return normalized_path
     return f"{root}{normalized_path}"
 
 
-def _build_authorization_tests_from_openapi(spec: Dict[str, Any], path_param_default: str = "1") -> List[Dict[str, Any]]:
+def _build_authorization_tests_from_openapi(
+    spec: Dict[str, Any],
+    path_param_default: str = "1",
+    path_param_defaults: Optional[Dict[str, str]] = None,
+    operation_path_param_defaults: Optional[Dict[str, Dict[str, str]]] = None,
+    exclude_operation_ids: Optional[List[str]] = None,
+    expectation_overrides: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     base_url = ""
     servers = spec.get("servers", [])
     if isinstance(servers, list) and servers:
         first_server = servers[0]
         if isinstance(first_server, dict):
             base_url = str(first_server.get("url", "")).strip()
+
+    operation_defaults = operation_path_param_defaults or {}
+    global_param_defaults = path_param_defaults or {}
+    excluded = set(exclude_operation_ids or [])
+    expectation_map = expectation_overrides or {}
 
     tests: List[Dict[str, Any]] = []
     for path, methods in spec.get("paths", {}).items():
@@ -360,17 +662,39 @@ def _build_authorization_tests_from_openapi(spec: Dict[str, Any], path_param_def
             operation_id = ""
             if isinstance(operation, dict):
                 operation_id = str(operation.get("operationId", "")).strip()
+            if operation_id and operation_id in excluded:
+                continue
+
+            merged_param_defaults = dict(global_param_defaults)
+            op_param_defaults = operation_defaults.get(operation_id, {})
+            if isinstance(op_param_defaults, dict):
+                merged_param_defaults.update({k: str(v) for k, v in op_param_defaults.items()})
+
             request_spec: Dict[str, Any] = {
                 "method": str(method).upper(),
-                "url": _normalize_openapi_request_url(base_url, str(path), path_param_default),
+                "url": _normalize_openapi_request_url(
+                    base_url,
+                    str(path),
+                    path_param_default,
+                    path_param_defaults=merged_param_defaults,
+                ),
                 "headers": {"Authorization": "Bearer {{access_token}}"},
             }
-            tests.append(
-                {
-                    "name": operation_id or f"openapi-{str(method).lower()}-{path}",
-                    "request": request_spec,
-                }
-            )
+            test_name = operation_id or f"openapi-{str(method).lower()}-{path}"
+            test_item: Dict[str, Any] = {
+                "name": test_name,
+                "request": request_spec,
+            }
+
+            raw_expectation = expectation_map.get(operation_id)
+            if isinstance(raw_expectation, list):
+                test_item["expectations"] = {"allowed_users": [str(u) for u in raw_expectation]}
+            elif isinstance(raw_expectation, dict):
+                allowed_users = raw_expectation.get("allowed_users")
+                if isinstance(allowed_users, list):
+                    test_item["expectations"] = {"allowed_users": [str(u) for u in allowed_users]}
+
+            tests.append(test_item)
     return tests
 
 
@@ -399,9 +723,19 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         openapi_spec = _load_openapi_spec(config)
         if openapi_spec:
             path_param_default = str(config.get("openapi_path_param_default", "1"))
+            path_param_defaults = config.get("openapi_path_param_defaults", {})
+            operation_path_param_defaults = config.get("openapi_operation_path_param_defaults", {})
+            exclude_operation_ids = config.get("openapi_exclude_operation_ids", [])
+            expectation_overrides = config.get("openapi_expectation_overrides", {})
             config["authorization_tests"] = _build_authorization_tests_from_openapi(
                 openapi_spec,
                 path_param_default=path_param_default,
+                path_param_defaults=path_param_defaults if isinstance(path_param_defaults, dict) else {},
+                operation_path_param_defaults=operation_path_param_defaults
+                if isinstance(operation_path_param_defaults, dict)
+                else {},
+                exclude_operation_ids=exclude_operation_ids if isinstance(exclude_operation_ids, list) else [],
+                expectation_overrides=expectation_overrides if isinstance(expectation_overrides, dict) else {},
             )
         else:
             has_burp_history = "burp_history_requests" in config
@@ -426,10 +760,13 @@ def load_config(path: str) -> Dict[str, Any]:
 
 
 def choose_executor(config: Dict[str, Any]) -> RequestExecutor:
+    timeout_seconds = float(config.get("http_timeout_seconds", 20))
     burp_url = config.get("burp_mcp_url")
     if burp_url:
-        return BurpMCPExecutor(burp_url)
-    return DirectHTTPExecutor()
+        return BurpMCPExecutor(burp_url, timeout_seconds=timeout_seconds)
+    ssl_verify = bool(config.get("ssl_verify", True))
+    ca_bundle_path = str(config.get("target_ca_bundle_path", "")).strip()
+    return DirectHTTPExecutor(timeout_seconds=timeout_seconds, ssl_verify=ssl_verify, ca_bundle_path=ca_bundle_path)
 
 
 def generate_report(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -440,10 +777,104 @@ def generate_report(config: Dict[str, Any]) -> Dict[str, Any]:
         "users_tested": [u["name"] for u in config.get("users", [])],
         "findings": findings,
     }
-    llm_summary = maybe_generate_llm_summary(config, report)
-    if llm_summary:
-        report["llm_summary"] = llm_summary
+    report.update(maybe_generate_llm_summary(config, report))
     return report
+
+
+_SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+
+_SARIF_RULES = [
+    {"id": "IDOR-001", "name": "BrokenAccessControl",
+     "shortDescription": {"text": "Possible IDOR or broken access control"},
+     "helpUri": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+     "defaultConfiguration": {"level": "error"}},
+    {"id": "IDOR-002", "name": "IdenticalUnauthorizedAccess",
+     "shortDescription": {"text": "Possible IDOR: all users received identical successful responses"},
+     "helpUri": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+     "defaultConfiguration": {"level": "warning"}},
+    {"id": "IDOR-003", "name": "CrossUserDataLeak",
+     "shortDescription": {"text": "Possible cross-user data leak: all users succeeded but with different content"},
+     "helpUri": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+     "defaultConfiguration": {"level": "warning"}},
+    {"id": "IDOR-004", "name": "StatefulTestOrMissingFixture",
+     "shortDescription": {"text": "Possible stateful test or missing fixture"},
+     "defaultConfiguration": {"level": "warning"}},
+    {"id": "IDOR-005", "name": "UnexpectedAuthorizationBehavior",
+     "shortDescription": {"text": "Unexpected authorization or application behavior"},
+     "defaultConfiguration": {"level": "warning"}},
+    {"id": "IDOR-000", "name": "AuthorizationBehaviorObserved",
+     "shortDescription": {"text": "Authorization behavior observed (informational)"},
+     "defaultConfiguration": {"level": "note"}},
+]
+
+_FINDING_TO_RULE = {
+    "possible_idor_or_broken_access_control": "IDOR-001",
+    "possible_idor_identical_successful_access": "IDOR-002",
+    "possible_cross_user_data_leak": "IDOR-003",
+    "possible_stateful_test_or_missing_fixture": "IDOR-004",
+    "unexpected_authorization_or_application_behavior": "IDOR-005",
+    "authorization_behavior_observed": "IDOR-000",
+}
+
+_RISK_TO_SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note"}
+
+
+def generate_sarif_report(report: Dict[str, Any]) -> Dict[str, Any]:
+    results = []
+    for finding in report.get("findings", []):
+        rule_id = _FINDING_TO_RULE.get(finding.get("finding", ""), "IDOR-000")
+        level = _RISK_TO_SARIF_LEVEL.get(finding.get("risk", "low"), "note")
+        method = finding.get("request_method", "")
+        url = finding.get("request_url", "")
+        test_name = finding.get("test", "")
+        notes = finding.get("notes", [])
+        details_lines = [
+            f"{user}: HTTP {data['status']}"
+            for user, data in finding.get("details", {}).items()
+        ]
+        message_parts = [finding.get("finding", "")] + notes + details_lines
+        message_text = " | ".join(p for p in message_parts if p)
+
+        location: Dict[str, Any] = {
+            "logicalLocations": [
+                {
+                    "name": test_name,
+                    "fullyQualifiedName": f"{method} {url}".strip(),
+                    "kind": "member",
+                }
+            ]
+        }
+        if url:
+            location["physicalLocation"] = {"artifactLocation": {"uri": url}}
+
+        results.append({
+            "ruleId": rule_id,
+            "level": level,
+            "message": {"text": message_text},
+            "locations": [location],
+            "properties": {
+                "risk": finding.get("risk"),
+                "finding": finding.get("finding"),
+                "users_tested": list(finding.get("details", {}).keys()),
+            },
+        })
+
+    return {
+        "$schema": _SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "iDOR-Scanner",
+                        "informationUri": "https://github.com/swiru95/iDOR-Scanner",
+                        "rules": _SARIF_RULES,
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -451,6 +882,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", required=True, help="Path to JSON configuration")
     parser.add_argument("--instruction", help="Optional natural-language instruction prompt")
     parser.add_argument("--output", help="Optional output file path for report JSON")
+    parser.add_argument("--output-sarif", help="Optional output file path for SARIF report")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -464,7 +896,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(rendered + "\n")
-    return 0
+    if args.output_sarif:
+        sarif = generate_sarif_report(report)
+        with open(args.output_sarif, "w", encoding="utf-8") as f:
+            f.write(json.dumps(sarif, indent=2) + "\n")
+    has_high_risk = any(f.get("risk") == "high" for f in report.get("findings", []))
+    return 1 if has_high_risk else 0
 
 
 if __name__ == "__main__":

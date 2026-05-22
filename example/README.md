@@ -2,6 +2,11 @@
 
 This folder contains a small Flask app that can be used as a local target for `idor_scanner.py`.
 
+Useful browser entry points:
+
+- `GET /` landing page with links to all demo routes (useful for Burp crawl)
+- `GET /openapi.json` OpenAPI 3.0 document for scanner OpenAPI-based generation
+
 ## Demo users
 
 - `admin_user` / `admin-pass`
@@ -10,14 +15,15 @@ This folder contains a small Flask app that can be used as a local target for `i
 
 Roles are intentionally uneven:
 
-- `admin` can use all 10 example endpoints
+- `admin` can use all 13 example endpoints
 - `editor` can use a smaller subset
 - `viewer` can use only a few `GET` endpoints
 
-Two endpoints are intentionally vulnerable to IDOR so the scanner has something to flag:
+Three endpoints are intentionally vulnerable to broken access control / IDOR so the scanner has something to flag:
 
 - `GET /api/reports/<report_id>`
 - `GET /api/documents/<document_id>`
+- `GET /api/admin/audit-events/<event_id>`
 
 ## Run it
 
@@ -34,13 +40,19 @@ In a second terminal, run the scanner with the included config:
 python idor_scanner.py --config example/flask_idor_demo_config.json
 ```
 
-The expected result is that the scanner reports the two intentional IDOR examples while the other routes follow the declared role expectations.
+The expected result is that the scanner reports the intentional broken-access examples while the other routes follow the declared role expectations.
 
 ## Included config variants
 
 - `example/flask_idor_demo_config.json` uses the login flow and extracts tokens from `/auth/login`.
-- `example/flask_idor_demo_config_ollama.json` is the same demo config but also asks for an LLM summary from `http://ollama.kscsc.local` using `llama3.1`.
+- `example/flask_idor_demo_config_ollama.json` is the same demo config but also asks for an LLM summary from `https://ollama.kscsc.local` using `llama3.1`.
 - `example/flask_idor_demo_config_tokens_only.json` skips `login_sequence` entirely and uses per-user bearer tokens in `users[].headers`.
+- `example/flask_idor_demo_config_openapi.json` derives authorization tests from `example/flask_idor_demo_openapi.json`.
+- `example/flask_idor_demo_config_burp_history.json` derives authorization tests from Burp-history-style requests listed in config.
+- `example/flask_idor_demo_config_burp_mcp.json` sends scanner traffic through Burp MCP at `http://127.0.0.1:9876/`.
+- `example/flask_idor_demo_config_burp_mcp_openapi.json` derives tests from OpenAPI and routes traffic through Burp MCP.
+
+The combined OpenAPI config also demonstrates endpoint-specific defaults via `openapi_path_param_defaults`, operation-specific overrides via `openapi_operation_path_param_defaults`, expectation tuning with `openapi_expectation_overrides`, and filtering with `openapi_exclude_operation_ids`.
 
 Run any variant with:
 
@@ -50,4 +62,9 @@ python idor_scanner.py --config /absolute/path/to/example/<config-file>.json
 
 The token-only config uses demo tokens derived from the Flask app's intentionally unsigned local token format, so it is suitable only for this sample target. Those tokens are readable client-side and are not production-safe.
 
-The Ollama example uses plain HTTP because the requested host was `ollama.kscsc.local`; if your Ollama endpoint supports TLS, switch the config to `https://` before using it outside a trusted internal network.
+For internal TLS certificates, set `ollama_ca_bundle_path` in config so Python can validate `https://ollama.kscsc.local`.
+
+Burp MCP note:
+
+- This scanner supports MCP SSE transport on Burp root URL (for example `http://127.0.0.1:9876/`).
+- It calls Burp tool `send_http1_request` under the hood, so requests are visible in Burp while scanning.

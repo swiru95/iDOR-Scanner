@@ -12,6 +12,9 @@ This repository now includes an autonomous CLI scanner:
 - compares response status/body patterns and reports potential iDOR findings,
 - can optionally request a final summary from an Ollama model (`ollama_url` + `ollama_model`).
 
+Request timeout can be tuned with `http_timeout_seconds` (defaults to `20`).
+For internal TLS endpoints, set `ollama_ca_bundle_path` to a PEM bundle trusted for `ollama_url`.
+
 Run:
 
 ```bash
@@ -40,6 +43,12 @@ If the prompt declares `use these N users`, the scanner validates that the confi
 If the prompt includes `verify all requests from burp MCP history`, history requests must be provided.
 Use only one OpenAPI source (`openapi_spec` or `openapi_spec_path`) and only one Burp history source (`burp_history_requests` or `burp_mcp_history_requests`).
 OpenAPI path parameters like `/users/{id}` default to `1`; customize with `openapi_path_param_default`.
+For better OpenAPI-derived test quality, you can also use:
+
+- `openapi_path_param_defaults` (map parameter names to values),
+- `openapi_operation_path_param_defaults` (map operationId -> parameter map),
+- `openapi_expectation_overrides` (map operationId -> expected allowed users),
+- `openapi_exclude_operation_ids` (skip specific operationIds such as `login`).
 
 Minimal config example:
 
@@ -79,6 +88,15 @@ Minimal config example:
   ]
 }
 ```
+
+### Expectation mismatch classification
+
+When `expectations.allowed_users` is provided:
+
+- unauthorized successes are reported as `high` risk (`possible_idor_or_broken_access_control`),
+- expected-allowed users receiving `401/403` are reported as `high` risk,
+- expected-allowed users receiving `404/410` are reported as `medium` risk (`possible_stateful_test_or_missing_fixture`) to reduce false positives caused by stateful test data,
+- other expected-allowed failures are reported as `medium` risk.
 
 Instruction-based config example:
 
@@ -136,8 +154,17 @@ A ready-to-run token-only demo config is also included at `example/flask_idor_de
 
 A runnable demo target is available in `example/`.
 
-- `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 10 example endpoints, and 2 intentional IDOR flaws.
+- `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 13 example endpoints, and 3 intentional broken-access flaws.
 - `example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
-- `example/flask_idor_demo_config_ollama.json` adds an Ollama-backed summary using `http://ollama.kscsc.local` (switch to `https://` if your Ollama endpoint supports TLS).
+- `example/flask_idor_demo_config_ollama.json` adds an Ollama-backed summary using `https://ollama.kscsc.local`.
 - `example/flask_idor_demo_config_tokens_only.json` shows a no-login configuration that uses only per-user bearer tokens for the local demo app.
+- `example/flask_idor_demo_config_openapi.json` demonstrates deriving tests from `example/flask_idor_demo_openapi.json`.
+- `example/flask_idor_demo_config_burp_history.json` demonstrates deriving tests from Burp-history-style requests.
+- `example/flask_idor_demo_config_burp_mcp.json` demonstrates routing scanner traffic through Burp MCP SSE (`http://127.0.0.1:9876/`).
+- `example/flask_idor_demo_config_burp_mcp_openapi.json` demonstrates OpenAPI-derived tests executed through Burp MCP SSE.
 - `example/README.md` explains how to run the sample locally.
+
+The demo app also exposes `GET /` as a crawl-friendly landing page and `GET /openapi.json` for local OpenAPI testing.
+
+If Ollama summarization fails, the report now includes `llm_summary_error` with a short error message.
+When using HTTPS with internal certificates, set `ollama_ca_bundle_path` to the CA chain file (PEM).
