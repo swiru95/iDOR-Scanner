@@ -1,6 +1,124 @@
 # iDOR-Scanner
 Repository that aims to help with iDOR detection supported by AI.
 
+## Architecture
+
+### Overview
+
+iDOR-Scanner is a single-file, zero-external-dependency Python CLI tool (`idor_scanner.py`). It requires only the Python standard library — no `pip install` needed beyond optional Flask for the demo target.
+
+The tool is structured around three sequential phases:
+
+```
+load_config
+  └─ apply_prompt_instruction_defaults   (derive login/tests from NL prompt / OpenAPI / Burp history)
+        │
+        ▼
+choose_executor                          (DirectHTTP or BurpMCP)
+        │
+        ▼
+authenticate_users  ──► (concurrent)    (run login_sequence for each user, extract tokens/cookies)
+        │
+        ▼
+run_authorization_tests ──► (concurrent per test × user)
+        │
+        ▼
+evaluate_test_results                   (expectation-based or heuristic)
+        │
+        ▼
+maybe_generate_llm_summary              (optional Ollama call)
+        │
+        ▼
+generate_report / generate_sarif_report (JSON + SARIF output, exit code 1 on high risk)
+```
+
+### Components
+
+**Request execution (strategy pattern)**
+
+Two executor implementations share the `RequestExecutor` interface:
+
+- `DirectHTTPExecutor` — sends requests with `urllib` directly to the target. Supports custom timeouts, TLS verification bypass, and CA bundle pinning.
+- `BurpMCPExecutor` — proxies every request through Burp Suite. On startup it probes the configured URL to auto-detect the transport: MCP SSE (opens an event-stream session, calls the `send_http1_request` tool) or legacy HTTP (simple JSON POST). All scanner traffic then appears in the Burp proxy history.
+
+**Template engine**
+
+Request specs are JSON objects with `{{variable}}` placeholders. `render_template()` resolves placeholders from the per-user context using dot-path notation (`{{user.token}}`) or environment variables (`{{env.SECRET}}`). Templates are rendered recursively across strings, dicts, and lists, so any field in a request — URL, headers, JSON body — can carry substitution markers.
+
+**Configuration loading and prompt-driven defaults**
+
+`load_config()` reads the JSON config and passes it through `apply_prompt_instruction_defaults()`, which inspects an optional `instruction_prompt` string and fills in missing sections:
+
+1. If `login_sequence` is absent, it derives a default POST-to-`/login` step from the prompt.
+2. If `authorization_tests` is absent and an OpenAPI spec is provided (inline or by path), it generates one test per operation, resolving `{param}` placeholders with configurable defaults.
+3. If no OpenAPI spec is provided, it falls back to `burp_history_requests` / `burp_mcp_history_requests` and wraps each request as a test with an injected `Authorization: Bearer {{access_token}}` header.
+
+**Authentication phase**
+
+`authenticate_users()` runs the `login_sequence` for every user in a `ThreadPoolExecutor`. After each step, `extract_value()` pulls values from the response (JSON path, response header, `Set-Cookie`, or regex) and stores them in that user's context dict. The resulting per-user contexts carry all extracted tokens and variables forward into the test phase.
+
+If no `login_sequence` is defined, each user can instead declare static `headers` (e.g. a pre-obtained bearer token) that are injected into every request for that user.
+
+**Test execution phase**
+
+`run_authorization_tests()` iterates over `authorization_tests`. For each test, all users fire the same request concurrently (another `ThreadPoolExecutor`). The request spec is rendered individually per user against that user's context, so every user sends requests with their own credentials.
+
+**Finding evaluation**
+
+`evaluate_test_results()` runs in one of two modes:
+
+- **Declarative** (when `expectations.allowed_users` is set): compares each user's actual HTTP status against the declared list of allowed users. Unauthorized 2xx responses and unexpectedly-denied allowed users are flagged as high risk (`possible_idor_or_broken_access_control`). 404/410 responses for allowed users are medium risk (`possible_stateful_test_or_missing_fixture`) to reduce noise from stateful test data.
+- **Heuristic** (no expectations): if all users receive 2xx with identical response bodies, it flags `possible_idor_identical_successful_access` (medium). If all users succeed but with different bodies, it flags `possible_cross_user_data_leak` (medium) and attaches full bodies for downstream LLM analysis.
+
+**Report output**
+
+The JSON report lists all findings with status codes, body hashes, body previews, and risk labels. SARIF output (`--output-sarif`) maps findings to six rules (IDOR-000 through IDOR-005) and emits `error`/`warning`/`note` levels, making results consumable by GitHub Advanced Security and other SARIF-aware tools. The process exits with code `1` if any high-risk finding is present, enabling clean CI gate integration.
+
+**Optional LLM summary**
+
+If `ollama_url` and `ollama_model` are set, `maybe_generate_llm_summary()` posts the full report JSON to a local Ollama instance and asks it to summarize authorization anomalies and probable false positives. The result is appended to the report as `llm_summary`.
+
+---
+
+## How this tool is designed to be used
+
+iDOR-Scanner is built for security testers and developers who need to verify that authorization boundaries hold across multiple user roles against a real running API. It covers four main workflows:
+
+**1. Direct API scan with a config file**
+
+Write a JSON config that describes your users, a login sequence, and the endpoints to test. Run the scanner against your staging or dev environment. This is the fastest path — no proxy setup, no external tooling.
+
+```bash
+python idor_scanner.py --config config.json --output report.json
+```
+
+Use `expectations.allowed_users` in each test to get precise, per-operation verdicts. Without expectations the scanner falls back to heuristics (identical responses across users, all-success with different bodies).
+
+**2. Burp Suite integration**
+
+Set `burp_mcp_url` to your Burp MCP endpoint. All scanner traffic is then routed through Burp, so you get full request/response visibility in Burp's proxy history and can replay or modify individual requests. The scanner auto-detects whether Burp speaks MCP SSE or the legacy HTTP protocol.
+
+This is the recommended workflow when you are already using Burp during a pentest engagement — the scanner turns Burp history into automated multi-user authorization checks.
+
+**3. CI/CD pipeline gate**
+
+Run the scanner in CI with `--output-sarif` to produce a SARIF file importable into GitHub Advanced Security or any SARIF-aware tool. The process exits with code `1` whenever a high-risk finding is detected, making it straightforward to fail a pipeline on a confirmed broken-access vulnerability.
+
+```bash
+python idor_scanner.py --config config.json --output-sarif results.sarif
+echo $?   # 1 if high-risk findings, 0 otherwise
+```
+
+**4. OpenAPI- or Burp-history-driven test generation**
+
+If you have an OpenAPI 3.0 spec, point `openapi_spec_path` at it and the scanner generates one authorization test per operation automatically. Combine with `openapi_expectation_overrides` to annotate which users should have access to which operations, and with `openapi_exclude_operation_ids` to skip auth endpoints.
+
+If you have a Burp proxy history export instead, list the raw requests under `burp_history_requests` (or `burp_mcp_history_requests` for live Burp MCP history). The scanner wraps each request as a test and injects the per-user token.
+
+Both sources can be combined with an `instruction_prompt` so the scanner derives the login sequence from natural language rather than requiring a hand-written `login_sequence` block.
+
+---
+
 ## Autonomous scanner
 
 This repository now includes an autonomous CLI scanner:
