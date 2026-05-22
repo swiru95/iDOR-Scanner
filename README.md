@@ -132,8 +132,8 @@ Per-user header example without login sequence:
 
 ## Local Flask example target
 
-A runnable demo target is available in `/home/runner/work/iDOR-Scanner/iDOR-Scanner/example`.
+A runnable demo target is available in `example/`.
 
-- `/home/runner/work/iDOR-Scanner/iDOR-Scanner/example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 10 example endpoints, and 2 intentional IDOR flaws.
-- `/home/runner/work/iDOR-Scanner/iDOR-Scanner/example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
-- `/home/runner/work/iDOR-Scanner/iDOR-Scanner/example/README.md` explains how to run the sample locally.
+- `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 10 example endpoints, and 2 intentional IDOR flaws.
+- `example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
+- `example/README.md` explains how to run the sample locally.

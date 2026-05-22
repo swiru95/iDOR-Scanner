@@ -81,6 +81,7 @@ ROLE_PERMISSIONS = {
 
 
 def _encode_token(username: str) -> str:
+    # Demo-only token format: readable and intentionally unsigned so the scanner can use a tiny local example app.
     payload = {
         "sub": username,
         "role": USERS[username]["role"],

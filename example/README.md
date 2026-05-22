@@ -25,13 +25,13 @@ Install Flask, then start the demo server:
 
 ```bash
 python -m pip install flask
-python /home/runner/work/iDOR-Scanner/iDOR-Scanner/example/flask_idor_demo.py
+python example/flask_idor_demo.py
 ```
 
 In a second terminal, run the scanner with the included config:
 
 ```bash
-python /home/runner/work/iDOR-Scanner/iDOR-Scanner/idor_scanner.py --config /home/runner/work/iDOR-Scanner/iDOR-Scanner/example/flask_idor_demo_config.json
+python idor_scanner.py --config example/flask_idor_demo_config.json
 ```
 
 The expected result is that the scanner reports the two intentional IDOR examples while the other routes follow the declared role expectations.
