@@ -32,6 +32,42 @@ maybe_generate_llm_summary              (optional Ollama call)
 generate_report / generate_sarif_report (JSON + SARIF output, exit code 1 on high risk)
 ```
 
+### LLM agent interaction
+
+```mermaid
+flowchart TD
+    CONFIG["config.json\ninstruction_prompt · users · credentials\n(no login_sequence)"]
+
+    CONFIG --> SEQ_PRESENT{login_sequence\nin config?}
+    SEQ_PRESENT -- yes --> AUTH
+    SEQ_PRESENT -- no --> OLLAMA_SET
+
+    OLLAMA_SET{ollama_url +\nollama_model set?}
+    OLLAMA_SET -- no --> REGEX["regex heuristic\nPOST /login · extract token field"]
+
+    OLLAMA_SET -- yes --> BUILD["build LLM prompt\n────────────────────\ninstruction_prompt\n+ per-user variable names\n+ annotated schema example"]
+
+    BUILD --> OLLAMA1(["Ollama\n/api/generate\ntemperature=0"])
+
+    OLLAMA1 --> PARSE{sanitise + parse\nJSON response}
+    PARSE -- valid --> LOGINSEQ
+    PARSE -- "invalid · attempt < 3" --> OLLAMA1
+    PARSE -- "invalid · max retries" --> REGEX
+
+    REGEX --> LOGINSEQ[["login_sequence\n[{request, extract}, ...]"]]
+    LOGINSEQ --> AUTH
+
+    AUTH["authenticate_users()\nrun login_sequence per user\nextract tokens into per-user context"]
+    AUTH --> TESTS["run_authorization_tests()\nall users × all endpoints — concurrent"]
+    TESTS --> EVAL["evaluate_test_results()\ndeclarative or heuristic"]
+    EVAL --> REPORT["generate_report()\nJSON + SARIF · exit 1 on HIGH risk"]
+
+    REPORT --> SUM_SET{ollama configured?}
+    SUM_SET -- no --> DONE(["done"])
+    SUM_SET -- yes --> OLLAMA2(["Ollama\n/api/generate\nsummarise findings\nflag false positives"])
+    OLLAMA2 --> DONE
+```
+
 ### Components
 
 **Request execution (strategy pattern)**
@@ -157,7 +193,7 @@ python idor_scanner.py --config config.json --instruction "go to login.example.c
 
 ### Prompt-driven defaults
 
-If `instruction_prompt` is present and `login_sequence` is missing, the scanner derives a login step automatically.
+If `instruction_prompt` is present and `login_sequence` is missing, the scanner derives a login step automatically. When `ollama_url` and `ollama_model` are also set, it sends the prompt to Ollama and uses the model's output as the `login_sequence` — enabling natural-language descriptions of arbitrary login flows (multi-step, token exchange, OAuth, cookie-based). If the Ollama call fails or returns unparseable output, the scanner falls back to a simple regex-based heuristic and prints a warning to stderr.
 If `authorization_tests` is missing and `openapi_spec` or `openapi_spec_path` is provided, tests are derived from OpenAPI operations first.
 If `authorization_tests` is missing and no OpenAPI source is provided, `burp_history_requests` (or `burp_mcp_history_requests`) is used and tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
 If you already have per-user credentials or tokens, `login_sequence` can be omitted and each user can define request `headers` applied to every request for that user.
@@ -220,6 +256,33 @@ When `expectations.allowed_users` is provided:
 - expected-allowed users receiving `404/410` are reported as `medium` risk (`possible_stateful_test_or_missing_fixture`) to reduce false positives caused by stateful test data,
 - other expected-allowed failures are reported as `medium` risk.
 
+LLM-assisted login sequence example (Ollama generates the `login_sequence` from the prompt):
+
+```json
+{
+  "ollama_url": "http://localhost:11434",
+  "ollama_model": "llama3",
+  "instruction_prompt": "POST to https://auth.corp/api/login with JSON body username and password. Extract the bearer token from the 'token' field in the JSON response. Use it as Authorization: Bearer {{access_token}} on all subsequent requests.",
+  "users": [
+    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
+    {"name": "bob",   "variables": {"username": "bob",   "password": "bob-pass"}}
+  ],
+  "authorization_tests": [
+    {
+      "name": "read-account",
+      "request": {
+        "method": "GET",
+        "url": "https://app.corp/api/accounts/1001",
+        "headers": {"Authorization": "Bearer {{access_token}}"}
+      },
+      "expectations": {"allowed_users": ["alice"]}
+    }
+  ]
+}
+```
+
+No `login_sequence` is needed — Ollama synthesises it from the prompt. If the model is unavailable or returns invalid JSON the scanner falls back silently.
+
 Instruction-based config example:
 
 ```json
@@ -279,6 +342,7 @@ A runnable demo target is available in `example/`.
 - `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 13 example endpoints, and 3 intentional broken-access flaws.
 - `example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
 - `example/flask_idor_demo_config_ollama.json` adds an Ollama-backed summary using `https://ollama.kscsc.local`.
+- `example/flask_idor_demo_config_llm_login.json` demonstrates LLM-generated login sequences: omits `login_sequence` and lets Ollama synthesise it from `instruction_prompt`, then tests all 15 endpoints including three additional invoice ownership tests not present in other configs.
 - `example/flask_idor_demo_config_tokens_only.json` shows a no-login configuration that uses only per-user bearer tokens for the local demo app.
 - `example/flask_idor_demo_config_openapi.json` demonstrates deriving tests from `example/flask_idor_demo_openapi.json`.
 - `example/flask_idor_demo_config_burp_history.json` demonstrates deriving tests from Burp-history-style requests.
