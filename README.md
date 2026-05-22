@@ -1,5 +1,5 @@
 # iDOR-Scanner
-Repository that aims to help with iDOR detection supported by AI.
+Zero-dependency Python CLI for automated broken object-level authorization (BOLA/IDOR) testing across multiple user roles. Deterministic authorization checks at the core, with a local LLM (Ollama) available as a second-opinion layer for login sequence generation, per-finding response analysis, and report summarisation — no cloud, no telemetry.
 
 ## Architecture
 
@@ -141,7 +141,7 @@ If `ollama_url` and `ollama_model` are set, `maybe_generate_llm_summary()` posts
 
 ## How this tool is designed to be used
 
-iDOR-Scanner is built for security testers and developers who need to verify that authorization boundaries hold across multiple user roles against a real running API. It covers four main workflows:
+iDOR-Scanner is built for security testers and developers who need to verify that authorization boundaries hold across multiple user roles against a real running API. The detection logic is deterministic and auditable — status codes and response bodies are compared against a declared allow-list. A local Ollama model plugs in at three optional points: generating the login sequence from plain English, analysing each finding's actual HTTP responses for semantic leakage, and summarising the finished report. It covers four main workflows:
 
 **1. Direct API scan with a config file**
 
@@ -178,16 +178,18 @@ Both sources can be combined with an `instruction_prompt` so the scanner derives
 
 ---
 
-## Autonomous scanner
+## Scanner
 
-This repository now includes an autonomous CLI scanner:
+- Consumes a JSON config describing users, a login sequence, and the endpoints to test.
+- Authenticates every user concurrently and extracts tokens or cookies from responses.
+- Fires every authorization test for all users in parallel and compares results.
+- Reports findings as JSON or SARIF; exits with code `1` on any high-risk result.
 
-- consumes a JSON configuration that can describe a login/authentication sequence or per-user request headers,
-- can derive the initial login sequence from a natural-language instruction prompt,
-- authenticates **N users** and extracts tokens from responses,
-- executes authorization test requests (direct HTTP or via `burp_mcp_url`),
-- compares response status/body patterns and reports potential iDOR findings,
-- can optionally request a final summary from an Ollama model (`ollama_url` + `ollama_model`).
+**LLM integration (all optional, all local via Ollama):**
+
+- **Login sequence generation** — describe the auth flow in plain English; the model produces the `login_sequence` JSON before the scan starts (`instruction_prompt` + `ollama_url` + `ollama_model`, no `login_sequence` in config).
+- **Per-finding response analysis** — after tests run, the model receives each finding's per-user HTTP statuses and body previews alongside the declared allow-list and returns a structured verdict (`confirmed_idor`, `likely_idor`, `possible_idor`, `false_positive`, `clean`) with reasoning and confidence (`llm_analyze_responses: true`).
+- **Report summarisation** — a final pass over the complete findings to surface anomalies and flag likely false positives (`ollama_url` + `ollama_model`).
 
 Request timeout can be tuned with `http_timeout_seconds` (defaults to `20`).
 For internal TLS endpoints, set `ollama_ca_bundle_path` to a PEM bundle trusted for `ollama_url`.
