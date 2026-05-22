@@ -129,3 +129,11 @@ Per-user header example without login sequence:
   ]
 }
 ```
+
+## Local Flask example target
+
+A runnable demo target is available in `example/`.
+
+- `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 10 example endpoints, and 2 intentional IDOR flaws.
+- `example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
+- `example/README.md` explains how to run the sample locally.
