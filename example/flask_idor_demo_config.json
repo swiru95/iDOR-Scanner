@@ -131,7 +131,6 @@
           "Authorization": "Bearer {{access_token}}"
         },
         "json": {
-          "project_id": "project-gamma",
           "name": "Gamma",
           "status": "draft"
         }
