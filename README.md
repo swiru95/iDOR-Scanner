@@ -74,6 +74,10 @@ If no `login_sequence` is defined, each user can instead declare static `headers
 
 The JSON report lists all findings with status codes, body hashes, body previews, and risk labels. SARIF output (`--output-sarif`) maps findings to six rules (IDOR-000 through IDOR-005) and emits `error`/`warning`/`note` levels, making results consumable by GitHub Advanced Security and other SARIF-aware tools. The process exits with code `1` if any high-risk finding is present, enabling clean CI gate integration.
 
+**LLM-assisted login sequence generation**
+
+If `ollama_url` and `ollama_model` are set and `login_sequence` is absent, `_generate_login_sequence_with_ollama()` sends the `instruction_prompt` to Ollama before the scan starts. The model receives the prompt, the available per-user variable names, and an annotated schema example, then returns a `login_sequence` JSON array. The scanner validates the result and falls back to the regex-based default if the model output cannot be parsed. This means a plain-English description of any login flow — multi-step, token-exchange, header-based — can be translated into a working sequence without hand-writing JSON.
+
 **Optional LLM summary**
 
 If `ollama_url` and `ollama_model` are set, `maybe_generate_llm_summary()` posts the full report JSON to a local Ollama instance and asks it to summarize authorization anomalies and probable false positives. The result is appended to the report as `llm_summary`.

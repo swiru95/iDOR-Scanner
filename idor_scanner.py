@@ -577,6 +577,125 @@ def _build_login_sequence_from_prompt(login_target: str, app_target: str) -> Lis
     ]
 
 
+_LOGIN_SEQUENCE_SCHEMA_EXAMPLE = """[
+  {
+    "request": {
+      "method": "POST",
+      "url": "https://auth.example.com/login",
+      "json": {"username": "{{username}}", "password": "{{password}}"}
+    },
+    "extract": {
+      "access_token": {"from": "json", "path": "data.token"},
+      "refresh_token": {"from": "json", "path": "data.refresh"}
+    }
+  },
+  {
+    "request": {
+      "method": "POST",
+      "url": "https://app.example.com/api/token/exchange",
+      "headers": {"Authorization": "Bearer {{access_token}}"},
+      "json": {"audience": "app"}
+    },
+    "extract": {
+      "app_token": {"from": "json", "path": "token"}
+    }
+  }
+]"""
+
+
+def _sanitize_llm_json(text: str) -> str:
+    """Fix the most common ways LLMs break JSON validity."""
+    # Strip markdown code fences
+    text = re.sub(r"```[a-zA-Z]*\n?", "", text).strip()
+    # Remove JS-style comments — only strip // that starts a line (after optional whitespace)
+    # so that URLs containing http:// are never mistakenly treated as comments
+    text = re.sub(r"^\s*//[^\n]*\n?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    # Remove trailing commas before } or ]
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    # Quote unquoted {{...}} template vars (e.g. "key": {{var}} → "key": "{{var}}")
+    text = re.sub(r"([:,\[]\s*)(\{\{[^}]+\}\})", r'\1"\2"', text)
+    # Escape literal control characters inside JSON strings
+    def _escape_ctrl_in_string(m: re.Match) -> str:
+        inner = m.group(1).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+        return f'"{inner}"'
+    text = re.sub(r'"([^"\\]*(?:\\.[^"\\]*)*)"', _escape_ctrl_in_string, text, flags=re.DOTALL)
+    return text
+
+
+def _extract_json_from_llm_output(text: str) -> Any:
+    text = _sanitize_llm_json(text)
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("No JSON array found in LLM output")
+    return json.loads(text[start : end + 1])
+
+
+def _generate_login_sequence_with_ollama(
+    prompt: str,
+    user_variable_names: List[str],
+    config: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    model = config.get("ollama_model")
+    base_url = config.get("ollama_url")
+    if not model or not base_url:
+        return None
+
+    ssl_verify = bool(config.get("ollama_ssl_verify", True))
+    ca_bundle_path = str(config.get("ollama_ca_bundle_path", "")).strip()
+
+    variables_hint = (
+        ", ".join(f"{{{{{v}}}}}" for v in user_variable_names)
+        if user_variable_names
+        else "{{username}}, {{password}}"
+    )
+
+    extract_hint = (
+        '{"from": "json", "path": "a.b"}  or  {"from": "header", "name": "X-Token"}'
+        '  or  {"from": "set_cookie", "name": "session"}'
+    )
+    llm_prompt = (
+        f"Generate a login_sequence JSON array for this authentication flow:\n\n"
+        f"{prompt}\n\n"
+        f"Available per-user variables (use as {{{{variable}}}} placeholders in strings): {variables_hint}\n"
+        f"Extraction rule formats: {extract_hint}\n\n"
+        f"Example output:\n{_LOGIN_SEQUENCE_SCHEMA_EXAMPLE}\n\n"
+        f"Return ONLY the JSON array, nothing else:"
+    )
+
+    payload = json.dumps({
+        "model": model,
+        "prompt": llm_prompt,
+        "stream": False,
+        "options": {"temperature": 0},
+    }).encode("utf-8")
+    ctx = _build_ssl_context(ssl_verify, ca_bundle_path)
+    api_url = base_url.rstrip("/") + "/api/generate"
+
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt in range(1, 4):
+        req = urllib.request.Request(api_url, data=payload, method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                response = json.loads(resp.read().decode("utf-8"))
+            raw = response.get("response", "")
+            sequence = _extract_json_from_llm_output(raw)
+            if not isinstance(sequence, list) or not sequence:
+                raise ValueError("LLM returned empty or non-list result")
+            if not all(isinstance(step, dict) and "request" in step for step in sequence):
+                raise ValueError("One or more steps missing required 'request' key")
+            return sequence
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 3:
+                print(f"[iDOR] Ollama login sequence attempt {attempt} failed ({exc}), retrying…", file=sys.stderr)
+
+    print(f"[iDOR] Warning: Ollama login sequence generation failed ({last_exc}), falling back to defaults", file=sys.stderr)
+    return None
+
+
 def _build_authorization_tests_from_burp_history(history_requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     tests: List[Dict[str, Any]] = []
     for index, request_spec in enumerate(history_requests, start=1):
@@ -714,10 +833,19 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     if not config.get("login_sequence"):
-        config["login_sequence"] = _build_login_sequence_from_prompt(
-            inferred.get("login_target", ""),
-            inferred.get("app_target", ""),
-        )
+        user_variable_names = list({
+            key
+            for user in config.get("users", [])
+            for key in user.get("variables", {}).keys()
+        })
+        llm_sequence = _generate_login_sequence_with_ollama(prompt, user_variable_names, config)
+        if llm_sequence is not None:
+            config["login_sequence"] = llm_sequence
+        else:
+            config["login_sequence"] = _build_login_sequence_from_prompt(
+                inferred.get("login_target", ""),
+                inferred.get("app_target", ""),
+            )
 
     if not config.get("authorization_tests"):
         openapi_spec = _load_openapi_spec(config)

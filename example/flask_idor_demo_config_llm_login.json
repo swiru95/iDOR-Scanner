@@ -1,0 +1,194 @@
+{
+  "ollama_url": "https://ollama.kscsc.local",
+  "ollama_model": "qwen2.5:14b",
+  "ollama_ssl_verify": false,
+
+  "instruction_prompt": "Authenticate to the Flask demo app running at http://127.0.0.1:5000. Send a POST request to /auth/login with a JSON body containing the 'username' and 'password' fields. The server responds with JSON — extract the bearer token from the 'token' field in the response and store it as access_token. Use Authorization: Bearer {{access_token}} for all protected endpoints.",
+
+  "users": [
+    {
+      "name": "admin_user",
+      "variables": { "username": "admin_user", "password": "admin-pass" }
+    },
+    {
+      "name": "editor_user",
+      "variables": { "username": "editor_user", "password": "editor-pass" }
+    },
+    {
+      "name": "viewer_user",
+      "variables": { "username": "viewer_user", "password": "viewer-pass" }
+    }
+  ],
+
+  "authorization_tests": [
+    {
+      "name": "profile-all-roles",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/me/profile",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user", "viewer_user"]
+      }
+    },
+    {
+      "name": "project-read-all-roles",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/projects/project-alpha",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user", "viewer_user"]
+      }
+    },
+    {
+      "name": "project-summary-all-roles",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/projects/project-alpha/summary",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user", "viewer_user"]
+      }
+    },
+    {
+      "name": "team-members-all-roles",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/teams/team-core/members",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user", "viewer_user"]
+      }
+    },
+    {
+      "name": "report-admin-only-idor",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/reports/report-admin-finance",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    },
+    {
+      "name": "document-admin-only-idor",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/documents/doc-admin-secret",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    },
+    {
+      "name": "audit-event-admin-only-broken-access",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/admin/audit-events/audit-security-001",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    },
+    {
+      "name": "invoice-admin-owned",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/invoices/invoice-admin-001",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    },
+    {
+      "name": "invoice-editor-owned",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/invoices/invoice-editor-001",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    },
+    {
+      "name": "invoice-viewer-owned",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:5000/api/invoices/invoice-viewer-001",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    },
+    {
+      "name": "project-create",
+      "request": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/api/projects",
+        "headers": { "Authorization": "Bearer {{access_token}}" },
+        "json": { "name": "Scanner Test Project", "status": "draft" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user"]
+      }
+    },
+    {
+      "name": "project-comment-create",
+      "request": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/api/projects/project-alpha/comments",
+        "headers": { "Authorization": "Bearer {{access_token}}" },
+        "json": { "message": "Scanner test comment" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user"]
+      }
+    },
+    {
+      "name": "project-update",
+      "request": {
+        "method": "PUT",
+        "url": "http://127.0.0.1:5000/api/projects/project-alpha",
+        "headers": { "Authorization": "Bearer {{access_token}}" },
+        "json": { "name": "Alpha Updated", "status": "review" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user"]
+      }
+    },
+    {
+      "name": "project-status-patch",
+      "request": {
+        "method": "PATCH",
+        "url": "http://127.0.0.1:5000/api/projects/project-alpha/status",
+        "headers": { "Authorization": "Bearer {{access_token}}" },
+        "json": { "status": "released" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user", "editor_user"]
+      }
+    },
+    {
+      "name": "project-delete-admin-only",
+      "request": {
+        "method": "DELETE",
+        "url": "http://127.0.0.1:5000/api/projects/project-beta",
+        "headers": { "Authorization": "Bearer {{access_token}}" }
+      },
+      "expectations": {
+        "allowed_users": ["admin_user"]
+      }
+    }
+  ]
+}
