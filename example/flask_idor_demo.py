@@ -249,6 +249,8 @@ def create_project():
         return error
     payload = request.get_json(silent=True) or {}
     project_id = payload.get("project_id") or f"project-{uuid.uuid4().hex[:8]}"
+    if project_id in PROJECTS:
+        return _error(409, "conflict", f"Project '{project_id}' already exists.")
     PROJECTS[project_id] = {
         "name": payload.get("name", "Unnamed"),
         "status": payload.get("status", "draft"),
