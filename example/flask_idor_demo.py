@@ -88,7 +88,7 @@ ROLE_PERMISSIONS = {
 
 def _encode_token(username: str) -> str:
     # Demo-only token format: readable and intentionally unsigned so the scanner can use a tiny local example app.
-    # Never use this token format in production.
+    # It has no signature verification and no expiration handling, so it must never be used in production.
     payload = {
         "sub": username,
         "role": USERS[username]["role"],
@@ -206,6 +206,7 @@ def get_project_summary(project_id: str):
 
 @app.get("/api/reports/<report_id>")
 def get_report(report_id: str):
+    # Intentional IDOR example: any authenticated user can read the report because object-level authorization is skipped.
     user, error = _require_authenticated_user()
     if error:
         return error
@@ -224,6 +225,7 @@ def get_report(report_id: str):
 
 @app.get("/api/documents/<document_id>")
 def get_document(document_id: str):
+    # Intentional IDOR example: any authenticated user can read the document because object-level authorization is skipped.
     user, error = _require_authenticated_user()
     if error:
         return error
@@ -250,7 +252,7 @@ def create_project():
     PROJECTS[project_id] = {
         "name": payload.get("name", "Unnamed"),
         "status": payload.get("status", "draft"),
-        "owner": payload.get("owner", user["username"]),
+        "owner": user["username"],
     }
     return jsonify({"allowed": True, "created_by": user["username"], "project_id": project_id}), 201
 
@@ -286,7 +288,6 @@ def update_project(project_id: str):
         {
             "name": payload.get("name", project["name"]),
             "status": payload.get("status", project["status"]),
-            "owner": payload.get("owner", project["owner"]),
         }
     )
     return jsonify({"allowed": True, "updated_by": user["username"], "project": project})
