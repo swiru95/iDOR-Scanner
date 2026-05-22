@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
+import warnings
 
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+DEMO_WARNING = (
+    "Demo-only Flask target: credentials are hardcoded for scanner testing and tokens are intentionally unsigned. "
+    "Do not use this code in production."
+)
 
 USERS = {
     "admin_user": {
@@ -82,6 +88,7 @@ ROLE_PERMISSIONS = {
 
 def _encode_token(username: str) -> str:
     # Demo-only token format: readable and intentionally unsigned so the scanner can use a tiny local example app.
+    # Never use this token format in production.
     payload = {
         "sub": username,
         "role": USERS[username]["role"],
@@ -239,7 +246,7 @@ def create_project():
     if error:
         return error
     payload = request.get_json(silent=True) or {}
-    project_id = payload.get("project_id") or f"project-{len(PROJECTS) + 1}"
+    project_id = payload.get("project_id") or f"project-{uuid.uuid4().hex[:8]}"
     PROJECTS[project_id] = {
         "name": payload.get("name", "Unnamed"),
         "status": payload.get("status", "draft"),
@@ -310,4 +317,5 @@ def delete_project(project_id: str):
 
 
 if __name__ == "__main__":
+    warnings.warn(DEMO_WARNING, stacklevel=1)
     app.run(host="127.0.0.1", port=5000, debug=False)
