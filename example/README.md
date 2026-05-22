@@ -48,4 +48,6 @@ Run any variant with:
 python idor_scanner.py --config /absolute/path/to/example/<config-file>.json
 ```
 
-The token-only config uses demo tokens derived from the Flask app's intentionally unsigned local token format, so it is suitable only for this sample target.
+The token-only config uses demo tokens derived from the Flask app's intentionally unsigned local token format, so it is suitable only for this sample target. Those tokens are readable client-side and are not production-safe.
+
+The Ollama example uses plain HTTP because the requested host was `ollama.kscsc.local`; if your Ollama endpoint supports TLS, switch the config to `https://` before using it outside a trusted internal network.
