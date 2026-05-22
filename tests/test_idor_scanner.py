@@ -115,6 +115,40 @@ class TestIDORScannerHelpers(unittest.TestCase):
         self.assertEqual(executor.calls[2]["headers"]["Authorization"], "Bearer t-alice")
         self.assertEqual(executor.calls[3]["headers"]["Authorization"], "Bearer t-bob")
 
+    def test_run_authorization_tests_supports_per_user_headers_without_login_sequence(self):
+        config = {
+            "users": [
+                {"name": "john", "variables": {}, "headers": {"Authorization": "Bearer X"}},
+                {"name": "bob", "variables": {}, "headers": {"Authorization": "Bearer Y"}},
+            ],
+            "authorization_tests": [
+                {
+                    "name": "profile-read",
+                    "request": {
+                        "method": "GET",
+                        "url": "https://example.test/profile/100",
+                        "headers": {"Authorization": "Bearer {{access_token}}"},
+                    },
+                }
+            ],
+        }
+        executor = FakeExecutor(
+            [
+                HTTPResult(200, {}, '{"owner":"john"}'),
+                HTTPResult(403, {}, "forbidden"),
+            ]
+        )
+
+        user_contexts = authenticate_users(config, executor)
+        findings = run_authorization_tests(config, user_contexts, executor)
+
+        self.assertEqual(user_contexts["john"], {})
+        self.assertEqual(user_contexts["bob"], {})
+        self.assertEqual(findings[0]["details"]["john"]["status"], 200)
+        self.assertEqual(findings[0]["details"]["bob"]["status"], 403)
+        self.assertEqual(executor.calls[0]["headers"]["Authorization"], "Bearer X")
+        self.assertEqual(executor.calls[1]["headers"]["Authorization"], "Bearer Y")
+
     def test_apply_prompt_instruction_defaults_derives_login_and_tests(self):
         config = {
             "instruction_prompt": (

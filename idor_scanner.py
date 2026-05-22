@@ -109,6 +109,17 @@ def render_template(value: Any, context: Dict[str, Any]) -> Any:
     return value
 
 
+def _apply_user_headers(request_spec: Dict[str, Any], user: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    user_headers = user.get("headers", {})
+    if not isinstance(user_headers, dict) or not user_headers:
+        return request_spec
+    rendered_headers = render_template(copy.deepcopy(user_headers), context)
+    request_headers = request_spec.setdefault("headers", {})
+    for header_name, header_value in rendered_headers.items():
+        request_headers[str(header_name)] = str(header_value)
+    return request_spec
+
+
 def extract_value(result: HTTPResult, rule: Dict[str, str]) -> str:
     source = rule.get("from", "json")
     if source == "header":
@@ -188,6 +199,7 @@ def authenticate_users(config: Dict[str, Any], executor: RequestExecutor) -> Dic
         context = {**shared, **user.get("variables", {})}
         for step in sequence:
             request_spec = render_template(copy.deepcopy(step["request"]), context)
+            request_spec = _apply_user_headers(request_spec, user, context)
             result = executor.send(request_spec)
             for target, rule in step.get("extract", {}).items():
                 context[target] = extract_value(result, rule)
@@ -203,6 +215,7 @@ def run_authorization_tests(config: Dict[str, Any], user_contexts: Dict[str, Dic
             user_name = user["name"]
             context = {**user_contexts[user_name], **test.get("variables", {})}
             request_spec = render_template(copy.deepcopy(test["request"]), context)
+            request_spec = _apply_user_headers(request_spec, user, context)
             per_user_results[user_name] = executor.send(request_spec)
         findings.append(
             evaluate_test_results(

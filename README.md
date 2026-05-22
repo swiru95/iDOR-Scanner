@@ -5,7 +5,7 @@ Repository that aims to help with iDOR detection supported by AI.
 
 This repository now includes an autonomous CLI scanner:
 
-- consumes a JSON configuration that describes a login/authentication sequence,
+- consumes a JSON configuration that can describe a login/authentication sequence or per-user request headers,
 - can derive the initial login sequence from a natural-language instruction prompt,
 - authenticates **N users** and extracts tokens from responses,
 - executes authorization test requests (direct HTTP or via `burp_mcp_url`),
@@ -35,6 +35,7 @@ python idor_scanner.py --config config.json --instruction "go to login.example.c
 If `instruction_prompt` is present and `login_sequence` is missing, the scanner derives a login step automatically.
 If `authorization_tests` is missing and `openapi_spec` or `openapi_spec_path` is provided, tests are derived from OpenAPI operations first.
 If `authorization_tests` is missing and no OpenAPI source is provided, `burp_history_requests` (or `burp_mcp_history_requests`) is used and tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
+If you already have per-user credentials or tokens, `login_sequence` can be omitted and each user can define request `headers` applied to every request for that user.
 If the prompt declares `use these N users`, the scanner validates that the config contains exactly `N` users.
 If the prompt includes `verify all requests from burp MCP history`, history requests must be provided.
 Use only one OpenAPI source (`openapi_spec` or `openapi_spec_path`) and only one Burp history source (`burp_history_requests` or `burp_mcp_history_requests`).
@@ -106,5 +107,25 @@ OpenAPI-based config example:
     {"name": "bob", "variables": {"username": "bob", "password": "bob-pass"}}
   ],
   "openapi_spec_path": "/absolute/path/to/openapi.json"
+}
+```
+
+Per-user header example without login sequence:
+
+```json
+{
+  "users": [
+    {"name": "john", "headers": {"Authorization": "Bearer X"}},
+    {"name": "bob", "headers": {"Authorization": "Bearer Y"}}
+  ],
+  "authorization_tests": [
+    {
+      "name": "read-account-1001",
+      "request": {
+        "method": "GET",
+        "url": "https://target.example/api/accounts/1001"
+      }
+    }
+  ]
 }
 ```
