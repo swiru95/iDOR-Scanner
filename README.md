@@ -383,6 +383,57 @@ Per-user header example without login sequence:
 }
 ```
 
+### OIDC / OAuth2 Authorization Code flow
+
+The scanner has no OIDC-specific code — instead, the standard OAuth2 / OpenID Connect **Authorization Code** flow is expressed as a multi-step `login_sequence`. Two things make this work:
+
+1. **Header extraction with a regex `pattern`** — the IdP returns the authorization code in the `Location` redirect header (`...?code=<value>&state=...`). An `extract` block with `from: header` reads that header and a `pattern` capture group pulls the code out.
+2. **A second token-exchange step** — the captured code is posted to the token endpoint as a form body (`grant_type=authorization_code`), and the resulting `access_token` is extracted from the JSON response and carried forward as a bearer token on every authorization test.
+
+Because each user runs the full sequence with their own `username`/`password` variables, every user ends up with their own independently-obtained access token before the IDOR tests fire.
+
+```yaml
+users:
+  - name: alice
+    variables: {username: alice, password: password1}
+  - name: bob
+    variables: {username: bob, password: password2}
+
+login_sequence:
+  # Step 1 — hit /authorize, capture the code from the Location redirect header
+  - request:
+      method: GET
+      url: http://localhost:5000/authorize?client_id=demo-client&redirect_uri=http://localhost:5000/callback&response_type=code&scope=openid&state=xyz&username={{username}}&password={{password}}
+    extract:
+      auth_code:
+        from: header
+        name: Location
+        pattern: code=([a-f0-9\-]+)
+  # Step 2 — exchange the code for an access token at /token
+  - request:
+      method: POST
+      url: http://localhost:5000/token
+      body: code={{auth_code}}&client_id=demo-client&redirect_uri=http://localhost:5000/callback&grant_type=authorization_code
+      headers:
+        Content-Type: application/x-www-form-urlencoded
+    extract:
+      access_token:
+        from: json
+        path: access_token
+
+authorization_tests:
+  - name: oidc-resource-access
+    request:
+      method: GET
+      url: http://localhost:5000/resource
+      headers:
+        Authorization: Bearer {{access_token}}
+    expectations:
+      allowed_users: [alice, bob]
+```
+
+The same two-step pattern handles any code-grant variant — extra steps (e.g. a separate consent POST), additional captured values (`id_token`, `state`), or token-exchange flows are just more entries in the `login_sequence`. When `ollama_url` / `ollama_model` are set and no `login_sequence` is given, you can also describe this flow in plain English via `instruction_prompt` and let Ollama synthesise the sequence. A runnable IdP and ready-to-run configs live in `example/oidc-http/`.
+
 ## Local Flask example target
 
 A runnable demo target is available in `example/`.
