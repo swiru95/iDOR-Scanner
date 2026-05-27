@@ -219,24 +219,24 @@ For internal TLS endpoints, set `ollama_ca_bundle_path` to a PEM bundle trusted 
 
 ### Configuration format
 
-Configs may be written in **YAML** (`.yaml` / `.yml`) or **JSON** (`.json`); the format is selected by file extension. The bundled example configs are YAML, which requires PyYAML (`pip install pyyaml`). JSON configs need no third-party dependencies — the rest of the tool is pure standard library. The examples below are shown in JSON, but the same keys apply to YAML.
+Configs may be written in **YAML** (`.yaml` / `.yml`) or **JSON** (`.json`); the format is selected by file extension. The bundled example configs are YAML, which requires PyYAML (`pip install pyyaml`). JSON configs need no third-party dependencies — the rest of the tool is pure standard library. The examples below are shown in YAML to match the bundled configs; the identical keys work in JSON.
 
 Run:
 
 ```bash
-python idor_scanner.py --config /absolute/path/to/config.json
+python idor_scanner.py --config /absolute/path/to/config.yaml
 ```
 
 Relative paths also work, for example:
 
 ```bash
-python idor_scanner.py --config config.json
+python idor_scanner.py --config config.yaml
 ```
 
 Prompt override is also supported:
 
 ```bash
-python idor_scanner.py --config config.json --instruction "go to login.example.com and obtain token for app.example.com use these 3 users"
+python idor_scanner.py --config config.yaml --instruction "go to login.example.com and obtain token for app.example.com use these 3 users"
 ```
 
 ### Prompt-driven defaults
@@ -258,41 +258,30 @@ For better OpenAPI-derived test quality, you can also use:
 
 Minimal config example:
 
-```json
-{
-  "burp_mcp_url": "http://localhost:8081/mcp/request",
-  "ollama_url": "http://localhost:11434",
-  "ollama_model": "llama3.1",
-  "users": [
-    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
-    {"name": "bob", "variables": {"username": "bob", "password": "bob-pass"}}
-  ],
-  "login_sequence": [
-    {
-      "request": {
-        "method": "POST",
-        "url": "https://target.example/api/login",
-        "json": {"username": "{{username}}", "password": "{{password}}"}
-      },
-      "extract": {
-        "access_token": {"from": "json", "path": "token"}
-      }
-    }
-  ],
-  "authorization_tests": [
-    {
-      "name": "read-account-1001",
-      "request": {
-        "method": "GET",
-        "url": "https://target.example/api/accounts/1001",
-        "headers": {"Authorization": "Bearer {{access_token}}"}
-      },
-      "expectations": {
-        "allowed_users": ["alice"]
-      }
-    }
-  ]
-}
+```yaml
+burp_mcp_url: http://localhost:8081/mcp/request
+ollama_url: http://localhost:11434
+ollama_model: llama3.1
+users:
+  - name: alice
+    variables: {username: alice, password: alice-pass}
+  - name: bob
+    variables: {username: bob, password: bob-pass}
+login_sequence:
+  - request:
+      method: POST
+      url: https://target.example/api/login
+      json: {username: "{{username}}", password: "{{password}}"}
+    extract:
+      access_token: {from: json, path: token}
+authorization_tests:
+  - name: read-account-1001
+    request:
+      method: GET
+      url: https://target.example/api/accounts/1001
+      headers: {Authorization: "Bearer {{access_token}}"}
+    expectations:
+      allowed_users: [alice]
 ```
 
 ### Expectation mismatch classification
@@ -306,79 +295,68 @@ When `expectations.allowed_users` is provided:
 
 LLM-assisted login sequence example (Ollama generates the `login_sequence` from the prompt):
 
-```json
-{
-  "ollama_url": "http://localhost:11434",
-  "ollama_model": "llama3",
-  "instruction_prompt": "POST to https://auth.corp/api/login with JSON body username and password. Extract the bearer token from the 'token' field in the JSON response. Use it as Authorization: Bearer {{access_token}} on all subsequent requests.",
-  "users": [
-    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
-    {"name": "bob",   "variables": {"username": "bob",   "password": "bob-pass"}}
-  ],
-  "authorization_tests": [
-    {
-      "name": "read-account",
-      "request": {
-        "method": "GET",
-        "url": "https://app.corp/api/accounts/1001",
-        "headers": {"Authorization": "Bearer {{access_token}}"}
-      },
-      "expectations": {"allowed_users": ["alice"]}
-    }
-  ]
-}
+```yaml
+ollama_url: http://localhost:11434
+ollama_model: llama3
+instruction_prompt: "POST to https://auth.corp/api/login with JSON body username and password. Extract the bearer token from the 'token' field in the JSON response. Use it as Authorization: Bearer {{access_token}} on all subsequent requests."
+users:
+  - name: alice
+    variables: {username: alice, password: alice-pass}
+  - name: bob
+    variables: {username: bob, password: bob-pass}
+authorization_tests:
+  - name: read-account
+    request:
+      method: GET
+      url: https://app.corp/api/accounts/1001
+      headers: {Authorization: "Bearer {{access_token}}"}
+    expectations:
+      allowed_users: [alice]
 ```
 
 No `login_sequence` is needed — Ollama synthesises it from the prompt. If the model is unavailable or returns invalid JSON the scanner falls back silently.
 
 Instruction-based config example:
 
-```json
-{
-  "instruction_prompt": "Hi, go to login.example.com and use username/password to obtain token for app.example.com, use these 3 users to test given in burp history requests",
-  "users": [
-    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
-    {"name": "bob", "variables": {"username": "bob", "password": "bob-pass"}},
-    {"name": "carol", "variables": {"username": "carol", "password": "carol-pass"}}
-  ],
-  "burp_history_requests": [
-    {"method": "GET", "url": "https://app.example.com/api/profile/100"},
-    {"method": "GET", "url": "https://app.example.com/api/profile/101"}
-  ]
-}
+```yaml
+instruction_prompt: "Hi, go to login.example.com and use username/password to obtain token for app.example.com, use these 3 users to test given in burp history requests"
+users:
+  - name: alice
+    variables: {username: alice, password: alice-pass}
+  - name: bob
+    variables: {username: bob, password: bob-pass}
+  - name: carol
+    variables: {username: carol, password: carol-pass}
+burp_history_requests:
+  - {method: GET, url: https://app.example.com/api/profile/100}
+  - {method: GET, url: https://app.example.com/api/profile/101}
 ```
 
 OpenAPI-based config example:
 
-```json
-{
-  "instruction_prompt": "go to login.example.com and obtain token for app.example.com use these 2 users",
-  "users": [
-    {"name": "alice", "variables": {"username": "alice", "password": "alice-pass"}},
-    {"name": "bob", "variables": {"username": "bob", "password": "bob-pass"}}
-  ],
-  "openapi_spec_path": "/absolute/path/to/openapi.json"
-}
+```yaml
+instruction_prompt: "go to login.example.com and obtain token for app.example.com use these 2 users"
+users:
+  - name: alice
+    variables: {username: alice, password: alice-pass}
+  - name: bob
+    variables: {username: bob, password: bob-pass}
+openapi_spec_path: /absolute/path/to/openapi.json
 ```
 
 Per-user header example without login sequence:
 
-```json
-{
-  "users": [
-    {"name": "john", "headers": {"Authorization": "Bearer X"}},
-    {"name": "bob", "headers": {"Authorization": "Bearer Y"}}
-  ],
-  "authorization_tests": [
-    {
-      "name": "read-account-1001",
-      "request": {
-        "method": "GET",
-        "url": "https://target.example/api/accounts/1001"
-      }
-    }
-  ]
-}
+```yaml
+users:
+  - name: john
+    headers: {Authorization: "Bearer X"}
+  - name: bob
+    headers: {Authorization: "Bearer Y"}
+authorization_tests:
+  - name: read-account-1001
+    request:
+      method: GET
+      url: https://target.example/api/accounts/1001
 ```
 
 ### OIDC / OAuth2 Authorization Code flow
