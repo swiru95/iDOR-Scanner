@@ -32,29 +32,20 @@ idor-scanner --config config.yaml --output report.json
 
 iDOR-Scanner is a single-file, zero-external-dependency Python CLI tool (`idor_scanner.py`). It requires only the Python standard library — no `pip install` needed beyond optional Flask for the demo target.
 
-The tool is structured around three sequential phases:
+The tool is structured around a sequence of phases:
 
-```
-load_config
-  └─ apply_prompt_instruction_defaults   (derive login/tests from NL prompt / OpenAPI / Burp history)
-        │
-        ▼
-choose_executor                          (DirectHTTP or BurpMCP)
-        │
-        ▼
-authenticate_users  ──► (concurrent)    (run login_sequence for each user, extract tokens/cookies)
-        │
-        ▼
-run_authorization_tests ──► (concurrent per test × user)
-        │
-        ▼
-evaluate_test_results                   (expectation-based or heuristic)
-        │
-        ▼
-maybe_generate_llm_summary              (optional Ollama call)
-        │
-        ▼
-generate_report / generate_sarif_report (JSON + SARIF output, exit code 1 on high risk)
+```mermaid
+flowchart TD
+    LOAD["load_config()"]
+    DEFAULTS["apply_prompt_instruction_defaults()\nderive login / tests from\nNL prompt · OpenAPI · Burp history"]
+    EXEC["choose_executor()\nDirectHTTP or BurpMCP"]
+    AUTH["authenticate_users()  ⟂ concurrent\nrun login_sequence per user\nextract tokens / cookies"]
+    TESTS["run_authorization_tests()  ⟂ concurrent\nevery test × every user\n(+ anonymous request)"]
+    EVAL["evaluate_test_results()\nexpectation-based or heuristic"]
+    SUMMARY["maybe_generate_llm_summary()\noptional Ollama call"]
+    REPORT["generate_report() / generate_sarif_report()\nJSON + SARIF · exit code 1 on high risk"]
+
+    LOAD --> DEFAULTS --> EXEC --> AUTH --> TESTS --> EVAL --> SUMMARY --> REPORT
 ```
 
 ### LLM agent interaction
