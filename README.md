@@ -34,18 +34,25 @@ iDOR-Scanner is a single-file, zero-external-dependency Python CLI tool (`idor_s
 
 The tool is structured around a sequence of phases:
 
+`main()` loads the config, then `generate_report()` orchestrates the scan. The phases:
+
 ```mermaid
 flowchart TD
-    LOAD["load_config()"]
-    DEFAULTS["apply_prompt_instruction_defaults()\nderive login / tests from\nNL prompt · OpenAPI · Burp history"]
+    LOAD["load_config()\n→ apply_prompt_instruction_defaults()\nderive login / tests from\nNL prompt · OpenAPI · Burp history"]
     EXEC["choose_executor()\nDirectHTTP or BurpMCP"]
-    AUTH["authenticate_users()  ⟂ concurrent\nrun login_sequence per user\nextract tokens / cookies"]
-    TESTS["run_authorization_tests()  ⟂ concurrent\nevery test × every user\n(+ anonymous request)"]
-    EVAL["evaluate_test_results()\nexpectation-based or heuristic"]
-    SUMMARY["maybe_generate_llm_summary()\noptional Ollama call"]
-    REPORT["generate_report() / generate_sarif_report()\nJSON + SARIF · exit code 1 on high risk"]
+    AUTH["authenticate_users()\nper user (concurrent): run login_sequence,\nextract tokens / cookies"]
 
-    LOAD --> DEFAULTS --> EXEC --> AUTH --> TESTS --> EVAL --> SUMMARY --> REPORT
+    subgraph TESTPHASE["run_authorization_tests() — per test, sequential"]
+        FIRE["all users fire the request concurrently\n+ one anonymous probe"]
+        EVAL["evaluate_test_results()\nexpectation-based or heuristic"]
+        FIRE --> EVAL
+    end
+
+    ANALYZE["llm_analyze_findings()\noptional · per-finding Ollama verdict"]
+    SUMMARY["maybe_generate_llm_summary()\noptional · Ollama report summary"]
+    OUTPUT["main(): print / write --output JSON\ngenerate_sarif_report() for --output-sarif\nexit code 1 on any high-risk finding"]
+
+    LOAD --> EXEC --> AUTH --> TESTPHASE --> ANALYZE --> SUMMARY --> OUTPUT
 ```
 
 ### LLM agent interaction
