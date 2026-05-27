@@ -427,18 +427,39 @@ class TestIDORScannerHelpers(unittest.TestCase):
         self.assertEqual(high_result["ruleId"], "IDOR-001")
         self.assertEqual(high_result["level"], "error")
         self.assertIn("viewer should not be allowed", high_result["message"]["text"])
-        self.assertEqual(
-            high_result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "https://example.test/api/secret/1",
-        )
+        # Without a source_uri there is no physicalLocation (a live http endpoint
+        # is not a checkout-relative file); the URL travels in logical/properties.
+        self.assertNotIn("physicalLocation", high_result["locations"][0])
         self.assertEqual(
             high_result["locations"][0]["logicalLocations"][0]["fullyQualifiedName"],
+            "GET https://example.test/api/secret/1",
+        )
+        self.assertEqual(
+            high_result["properties"]["endpoint"],
             "GET https://example.test/api/secret/1",
         )
 
         low_result = run["results"][1]
         self.assertEqual(low_result["ruleId"], "IDOR-000")
         self.assertEqual(low_result["level"], "note")
+
+    def test_generate_sarif_report_anchors_to_relative_source_uri(self):
+        report = {
+            "findings": [
+                {
+                    "test": "t", "finding": "possible_idor_or_broken_access_control",
+                    "risk": "high", "request_method": "GET",
+                    "request_url": "http://127.0.0.1:5000/api/secret/1",
+                    "details": {}, "notes": [],
+                }
+            ]
+        }
+        sarif = generate_sarif_report(report, source_uri="example/ci_flask_demo_config.yaml")
+        loc = sarif["runs"][0]["results"][0]["locations"][0]
+        self.assertEqual(
+            loc["physicalLocation"]["artifactLocation"]["uri"],
+            "example/ci_flask_demo_config.yaml",
+        )
 
     def test_generate_sarif_report_risk_level_mapping(self):
         def _finding(risk, finding_type):

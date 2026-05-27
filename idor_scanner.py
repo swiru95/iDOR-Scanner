@@ -1091,7 +1091,27 @@ _FINDING_TO_RULE = {
 _RISK_TO_SARIF_LEVEL = {"high": "error", "medium": "warning", "low": "note"}
 
 
-def generate_sarif_report(report: Dict[str, Any]) -> Dict[str, Any]:
+def _sarif_source_uri(config_path: str) -> str:
+    """Return a checkout-relative POSIX path for SARIF artifactLocation, or "".
+
+    GitHub code scanning rejects absolute or http(s) artifact URIs because it
+    can only relativize file paths against the repository checkout. A DAST
+    finding has no source file, so results are anchored to the config that
+    declared the tests (the live endpoint URL lives in the message/properties).
+    """
+    if not config_path:
+        return ""
+    try:
+        rel = os.path.relpath(config_path)
+    except ValueError:
+        return ""
+    rel = rel.replace(os.sep, "/")
+    if rel == ".." or rel.startswith("../"):
+        return ""
+    return rel
+
+
+def generate_sarif_report(report: Dict[str, Any], source_uri: str = "") -> Dict[str, Any]:
     results = []
     for finding in report.get("findings", []):
         rule_id = _FINDING_TO_RULE.get(finding.get("finding", ""), "IDOR-000")
@@ -1116,8 +1136,10 @@ def generate_sarif_report(report: Dict[str, Any]) -> Dict[str, Any]:
                 }
             ]
         }
-        if url:
-            location["physicalLocation"] = {"artifactLocation": {"uri": url}}
+        # Anchor to a checkout-relative file (the config) so code scanning can
+        # ingest it; the live http(s) endpoint is kept in properties/message.
+        if source_uri:
+            location["physicalLocation"] = {"artifactLocation": {"uri": source_uri}}
 
         results.append({
             "ruleId": rule_id,
@@ -1127,6 +1149,7 @@ def generate_sarif_report(report: Dict[str, Any]) -> Dict[str, Any]:
             "properties": {
                 "risk": finding.get("risk"),
                 "finding": finding.get("finding"),
+                "endpoint": f"{method} {url}".strip(),
                 "users_tested": list(finding.get("details", {}).keys()),
             },
         })
@@ -1169,7 +1192,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(rendered + "\n")
     if args.output_sarif:
-        sarif = generate_sarif_report(report)
+        sarif = generate_sarif_report(report, source_uri=_sarif_source_uri(args.config))
         with open(args.output_sarif, "w", encoding="utf-8") as f:
             f.write(json.dumps(sarif, indent=2) + "\n")
     has_high_risk = any(f.get("risk") == "high" for f in report.get("findings", []))
