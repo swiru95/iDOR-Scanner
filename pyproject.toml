@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idor-scanner"
+version = "0.1.0"
+description = "Zero-dependency CLI for multi-user IDOR/BOLA authorization testing, with optional local-LLM (Ollama) assistance."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "KSwidrak" }]
+keywords = ["security", "pentest", "idor", "bola", "authorization", "sarif", "dast"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=5.1"]
+
+[project.urls]
+Homepage = "https://github.com/swiru95/iDOR-Scanner"
+Repository = "https://github.com/swiru95/iDOR-Scanner"
+
+[project.scripts]
+idor-scanner = "idor_scanner:main"
+
+[tool.setuptools]
+py-modules = ["idor_scanner"]
