@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info:
+  title: Service3 Demo API
+  version: 1.0.0
+  description: OpenAPI spec for the Service3 demo target.
+servers:
+  - url: http://localhost:8080
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+paths:
+  /protected-resource:
+    get:
+      operationId: getProtectedResource
+      summary: Get protected resource
+      security:
+        - bearerAuth: []
+  /public:
+    get:
+      operationId: getPublic
+      summary: Get public resource

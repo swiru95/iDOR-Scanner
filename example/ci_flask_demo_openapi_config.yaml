@@ -1,0 +1,52 @@
+http_timeout_seconds: 10
+max_concurrent_requests: 3
+users:
+- name: admin_user
+  variables:
+    username: admin_user
+    password: admin-pass
+- name: editor_user
+  variables:
+    username: editor_user
+    password: editor-pass
+- name: viewer_user
+  variables:
+    username: viewer_user
+    password: viewer-pass
+login_sequence:
+- request:
+    method: POST
+    url: http://127.0.0.1:5000/auth/login
+    json:
+      username: '{{username}}'
+      password: '{{password}}'
+  extract:
+    access_token:
+      from: json
+      path: token
+openapi_spec_path: example/flask_idor_demo_openapi.json
+openapi_exclude_operation_ids:
+- login
+- createProject
+- updateProject
+- deleteProject
+- patchProjectStatus
+- createProjectComment
+- getDocument
+- getInvoice
+- getTeamMembers
+- getAdminAuditEvent
+openapi_operation_path_param_defaults:
+  getReport:
+    report_id: report-admin-finance
+  getProject:
+    project_id: project-alpha
+  getProjectSummary:
+    project_id: project-alpha
+openapi_expectation_overrides:
+  getReport:
+  - admin_user
+  getProfile:
+  - admin_user
+  - editor_user
+  - viewer_user

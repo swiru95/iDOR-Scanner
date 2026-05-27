@@ -1,0 +1,25 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Flask POST Demo API",
+    "version": "1.0.0",
+    "description": "OpenAPI spec for the POST demo target."
+  },
+  "servers": [
+    { "url": "http://localhost:5001" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    }
+  },
+  "paths": {
+    "/resource": {
+      "get": {
+        "operationId": "getResource",
+        "summary": "Get protected resource",
+        "security": [{ "bearerAuth": [] }]
+      }
+    }
+  }
+}

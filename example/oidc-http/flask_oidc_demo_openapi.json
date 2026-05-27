@@ -1,0 +1,25 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Flask OIDC Demo API",
+    "version": "1.0.0",
+    "description": "OpenAPI spec for the OIDC demo target."
+  },
+  "servers": [
+    { "url": "http://localhost:5000" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    }
+  },
+  "paths": {
+    "/resource": {
+      "get": {
+        "operationId": "getResource",
+        "summary": "Get protected resource",
+        "security": [{ "bearerAuth": [] }]
+      }
+    }
+  }
+}

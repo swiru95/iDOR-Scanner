@@ -1,0 +1,40 @@
+users:
+- name: admin_user
+  variables:
+    username: admin_user
+    password: admin-pass
+- name: editor_user
+  variables:
+    username: editor_user
+    password: editor-pass
+- name: viewer_user
+  variables:
+    username: viewer_user
+    password: viewer-pass
+login_sequence:
+- request:
+    method: GET
+    url: http://localhost:5000/authorize?client_id=demo-client&redirect_uri=http://localhost:5000/callback&response_type=code&scope=openid&state=xyz&username={{username}}&password={{password}}
+  extract:
+    auth_code:
+      from: header
+      name: Location
+      pattern: code=([a-f0-9\-]+)
+- request:
+    method: POST
+    url: http://localhost:5000/token
+    body: code={{auth_code}}&client_id=demo-client&redirect_uri=http://localhost:5000/callback&grant_type=authorization_code
+    headers:
+      Content-Type: application/x-www-form-urlencoded
+  extract:
+    access_token:
+      from: json
+      path: access_token
+openapi_spec_path: example/oidc-http/flask_oidc_demo_openapi.json
+openapi_path_param_defaults:
+  project_id: project-alpha
+  report_id: report-admin-finance
+  document_id: doc-admin-secret
+  invoice_id: invoice-admin-001
+  team_id: team-core
+  event_id: audit-security-001

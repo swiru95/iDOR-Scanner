@@ -6,9 +6,12 @@ import uuid
 import warnings
 from pathlib import Path
 
+import os
 from flask import Flask, Response, jsonify, request
 
 app = Flask(__name__)
+
+TRUSTED_ISSUER = "http://localhost:5000"  # Hardcoded for demo
 DEMO_WARNING = (
     "Demo-only Flask target: credentials are hardcoded for scanner testing and tokens are intentionally unsigned. "
     "Do not use this code in production."
@@ -124,12 +127,13 @@ ROLE_PERMISSIONS = {
 }
 
 
-def _encode_token(username: str) -> str:
+def _encode_token(username: str, issuer: str = None) -> str:
     # Demo-only token format: readable and intentionally unsigned so the scanner can use a tiny local example app.
     # It has no signature verification and no expiration handling, so it must never be used in production.
     payload = {
         "sub": username,
         "role": USERS[username]["role"],
+        "iss": issuer if isinstance(issuer, str) and issuer else TRUSTED_ISSUER,
     }
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
@@ -145,9 +149,19 @@ def _decode_token(token: str) -> dict | None:
 
     username = data.get("sub")
     role = data.get("role")
-    if username not in USERS or USERS[username]["role"] != role:
-        return None
-    return {"username": username, **USERS[username]}
+    issuer = data.get("iss")
+    # Accept tokens from trusted issuer, use claims directly (for demo)
+    if issuer == TRUSTED_ISSUER:
+        # If local user DB, check role matches; else, trust claims
+        if username in USERS:
+            # Local user: check role matches
+            if USERS[username]["role"] != role:
+                return None
+            return {"username": username, **USERS[username]}
+        # External user: trust claims (for demo)
+        return {"username": username, "role": role, "issuer": issuer}
+    # Not trusted issuer
+    return None
 
 
 def _error(status: int, error: str, message: str):
@@ -167,8 +181,8 @@ def _require_authenticated_user():
 
 def _require_permission(permission: str):
     user, error = _require_authenticated_user()
-    if error:
-        return None, error
+    if error or not user or "role" not in user:
+        return None, error or _error(401, "invalid_token", "Token is missing or invalid.")
     if permission not in ROLE_PERMISSIONS.get(user["role"], set()):
         return None, _error(403, "forbidden", f"Role '{user['role']}' is not allowed to access '{permission}'.")
     return user, None
@@ -231,32 +245,56 @@ def login():
             "token": _encode_token(username),
             "role": user["role"],
             "username": username,
+            "issuer": TRUSTED_ISSUER,
         }
     )
+@app.get("/protected-resource")
+def protected_resource():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing_token"}), 401
+    token = auth.split(" ", 1)[1]
+    data = _decode_token(token)
+    if not data or "role" not in data:
+        return jsonify({"error": "invalid_token"}), 401
+    # Demo: return resource based on role
+    resources = {
+        "admin": {"data": "Admin secret."},
+        "editor": {"data": "Editor content."},
+        "viewer": {"data": "Viewer content."},
+    }
+    return jsonify({
+        "user": data["username"],
+        "role": data["role"],
+        "issuer": data.get("issuer", TRUSTED_ISSUER),
+        "resource": resources.get(data["role"], {"data": "This is public."}),
+    })
+
+
+@app.get("/public")
+def public():
+    return jsonify({"data": "This is public."})
 
 
 @app.get("/api/me/profile")
 def get_profile():
     user, error = _require_permission("get_profile")
-    if error:
-        return error
-    return jsonify(
-        {
-            "allowed": True,
-            "profile": {
-                "username": user["username"],
-                "role": user["role"],
-                "display_name": user["display_name"],
-            },
-        }
-    )
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
+    profile = {
+        "username": user["username"],
+        "role": user["role"],
+    }
+    if "display_name" in user:
+        profile["display_name"] = user["display_name"]
+    return jsonify({"allowed": True, "profile": profile})
 
 
 @app.get("/api/projects/<project_id>")
 def get_project(project_id: str):
     user, error = _require_permission("get_project")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     project = PROJECTS.get(project_id)
     if not project:
         return _error(404, "not_found", f"Project '{project_id}' was not found.")
@@ -266,8 +304,8 @@ def get_project(project_id: str):
 @app.get("/api/projects/<project_id>/summary")
 def get_project_summary(project_id: str):
     user, error = _require_permission("get_project_summary")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     project = PROJECTS.get(project_id)
     if not project:
         return _error(404, "not_found", f"Project '{project_id}' was not found.")
@@ -288,8 +326,8 @@ def get_project_summary(project_id: str):
 def get_report(report_id: str):
     # Intentional IDOR example: any authenticated user can read the report because object-level authorization is skipped.
     user, error = _require_authenticated_user()
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     report = REPORTS.get(report_id)
     if not report:
         return _error(404, "not_found", f"Report '{report_id}' was not found.")
@@ -307,8 +345,8 @@ def get_report(report_id: str):
 def get_document(document_id: str):
     # Intentional IDOR example: any authenticated user can read the document because object-level authorization is skipped.
     user, error = _require_authenticated_user()
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     document = DOCUMENTS.get(document_id)
     if not document:
         return _error(404, "not_found", f"Document '{document_id}' was not found.")
@@ -325,8 +363,8 @@ def get_document(document_id: str):
 @app.get("/api/invoices/<invoice_id>")
 def get_invoice(invoice_id: str):
     user, error = _require_permission("get_invoice")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     invoice = INVOICES.get(invoice_id)
     if not invoice:
         return _error(404, "not_found", f"Invoice '{invoice_id}' was not found.")
@@ -338,8 +376,8 @@ def get_invoice(invoice_id: str):
 @app.get("/api/teams/<team_id>/members")
 def get_team_members(team_id: str):
     user, error = _require_permission("get_team_members")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     members = TEAM_MEMBERS.get(team_id)
     if not members:
         return _error(404, "not_found", f"Team '{team_id}' was not found.")
@@ -350,8 +388,8 @@ def get_team_members(team_id: str):
 def get_audit_event(event_id: str):
     # Intentional broken access control: any authenticated user can read admin-only audit events.
     user, error = _require_authenticated_user()
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     event = AUDIT_EVENTS.get(event_id)
     if not event:
         return _error(404, "not_found", f"Audit event '{event_id}' was not found.")
@@ -368,8 +406,8 @@ def get_audit_event(event_id: str):
 @app.post("/api/projects")
 def create_project():
     user, error = _require_permission("create_project")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     payload = request.get_json(silent=True) or {}
     project_id = payload.get("project_id") or f"project-{uuid.uuid4().hex[:8]}"
     if project_id in PROJECTS:
@@ -385,8 +423,8 @@ def create_project():
 @app.post("/api/projects/<project_id>/comments")
 def create_comment(project_id: str):
     user, error = _require_permission("create_comment")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     if project_id not in PROJECTS:
         return _error(404, "not_found", f"Project '{project_id}' was not found.")
     payload = request.get_json(silent=True) or {}
@@ -403,8 +441,8 @@ def create_comment(project_id: str):
 @app.put("/api/projects/<project_id>")
 def update_project(project_id: str):
     user, error = _require_permission("update_project")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     project = PROJECTS.get(project_id)
     if not project:
         return _error(404, "not_found", f"Project '{project_id}' was not found.")
@@ -421,8 +459,8 @@ def update_project(project_id: str):
 @app.patch("/api/projects/<project_id>/status")
 def patch_project_status(project_id: str):
     user, error = _require_permission("patch_project_status")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     project = PROJECTS.get(project_id)
     if not project:
         return _error(404, "not_found", f"Project '{project_id}' was not found.")
@@ -434,8 +472,8 @@ def patch_project_status(project_id: str):
 @app.delete("/api/projects/<project_id>")
 def delete_project(project_id: str):
     user, error = _require_permission("delete_project")
-    if error:
-        return error
+    if error or not user:
+        return error or _error(401, "invalid_token", "Token is missing or invalid.")
     project = PROJECTS.pop(project_id, None)
     if not project:
         return _error(404, "not_found", f"Project '{project_id}' was not found.")

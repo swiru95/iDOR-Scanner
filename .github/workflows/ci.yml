@@ -1,0 +1,199 @@
+# =============================================================================
+# Software Bill of Materials (SBOM)
+# Versions verified 2026-05-27. Bump the pinned majors below when components
+# release a new major.
+#
+# --- CI/CD pipeline components (used only to build/test, NOT shipped) ---
+#   Runner:                    ubuntu-latest (GitHub-hosted)
+#   Python (setup-python):     3.13 (unit tests also run on 3.9, the floor)
+#   actions/checkout            v6   - clone repository
+#   actions/setup-python        v6   - provision Python toolchain
+#   actions/upload-artifact     v7   - publish reports/SARIF as artifacts
+#   github/codeql-action        v4   - init/analyze (SAST) + upload-sarif
+#   pytest                      pip (latest)  - unit/smoke tests
+#   bandit[sarif]               pip (latest)  - Python SAST -> SARIF
+#   flask                       pip (latest)  - runs the demo DAST target only
+#   PyYAML                      pip (latest)  - load the YAML example configs
+#
+# --- iDOR-Scanner runtime footprint (idor_scanner.py) ---
+#   Runtime dependencies:      NONE (Python 3 standard library only)
+#     stdlib: argparse, base64, concurrent.futures, copy, hashlib, json, os,
+#             re, ssl, sys, time, urllib, dataclasses, typing
+#   Optional (lazy) imports:
+#     PyYAML                   required for .yaml/.yml configs (the bundled
+#                              example configs are YAML); JSON configs need none
+#   Optional external services (called over HTTP, not bundled):
+#     Ollama API               LLM second-opinion / login-sequence generation
+#     Burp Suite MCP endpoint  routing scan traffic through Burp
+#   Demo/example only (not part of the tool): flask
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke & unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (re.Match[str] annotations need >=3.9) + latest stable,
+        # proving the stdlib-only tool runs across the supported range.
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install test dependencies
+        run: pip install pytest
+      - name: CLI smoke test (no third-party imports)
+        run: |
+          python idor_scanner.py --help
+          python -c "import idor_scanner; print('import OK')"
+      - name: Unit tests
+        run: python -m pytest tests/ -q
+
+  sast-bandit:
+    name: SAST (Bandit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install Bandit
+        run: pip install "bandit[sarif]"
+      - name: Run Bandit
+        # Demo target intentionally ships insecure code; scan the scanner only.
+        run: bandit -r idor_scanner.py -f sarif -o bandit.sarif || true
+      - name: Upload Bandit SARIF artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bandit-sarif
+          path: bandit.sarif
+      - name: Upload Bandit SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+  sast-codeql:
+    name: SAST (CodeQL)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: python
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: codeql-python
+
+  dast:
+    name: DAST (scanner vs Flask demo)
+    runs-on: ubuntu-latest
+    needs: smoke
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install demo target dependencies
+        # flask runs the demo target; PyYAML is needed because the bundled
+        # example configs are YAML (JSON configs would not need it).
+        run: pip install flask pyyaml
+      - name: Start Flask demo target
+        run: |
+          python example/flask_idor_demo.py > flask-demo.log 2>&1 &
+          echo "FLASK_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5000/public >/dev/null && exit 0
+            sleep 1
+          done
+          echo "Flask demo did not become ready"; cat flask-demo.log; exit 1
+      - name: Run authorization scan (explicit config)
+        id: scan
+        run: |
+          set +e
+          python idor_scanner.py \
+            --config example/ci_flask_demo_config.yaml \
+            --output report.json \
+            --output-sarif report.sarif
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+      - name: Run authorization scan (OpenAPI spec + expectations)
+        # No Burp and no Ollama in CI, but spec-driven generation with
+        # expectation overrides is pure stdlib and fully deterministic.
+        id: scan_openapi
+        run: |
+          set +e
+          python idor_scanner.py \
+            --config example/ci_flask_demo_openapi_config.yaml \
+            --output report-openapi.json \
+            --output-sarif report-openapi.sarif
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+      - name: Assert planted IDOR was detected
+        # The demo ships a deliberate IDOR, so each scan MUST exit 1 and emit an
+        # error-level SARIF result. A clean run means detection regressed.
+        run: |
+          fail=0
+          check() {
+            name="$1"; code="$2"; sarif="$3"
+            test "$code" = "1" || { echo "[$name] expected exit 1 (high-risk finding); got $code"; fail=1; }
+            python -c "import json,sys; s=json.load(open('$sarif')); \
+              levels=[r['level'] for r in s['runs'][0]['results']]; \
+              print('[$name] SARIF levels:', levels); \
+              sys.exit(0 if 'error' in levels else 1)" || { echo "[$name] no error-level SARIF result"; fail=1; }
+          }
+          check explicit "${{ steps.scan.outputs.exit_code }}" report.sarif
+          check openapi "${{ steps.scan_openapi.outputs.exit_code }}" report-openapi.sarif
+          exit $fail
+      - name: Stop Flask demo target
+        if: always()
+        run: kill "$FLASK_PID" 2>/dev/null || true
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dast-reports
+          path: |
+            report.json
+            report.sarif
+            report-openapi.json
+            report-openapi.sarif
+            flask-demo.log
+      - name: Upload explicit-config SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: report.sarif
+          category: idor-dast
+      - name: Upload OpenAPI-scan SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: report-openapi.sarif
+          category: idor-dast-openapi

@@ -1,0 +1,31 @@
+users:
+- name: alice
+  variables:
+    username: alice
+    password: password1
+- name: bob
+  variables:
+    username: bob
+    password: password2
+login_sequence:
+- request:
+    method: POST
+    url: http://localhost:5001/login
+    json:
+      username: '{{username}}'
+      password: '{{password}}'
+  extract:
+    access_token:
+      from: json
+      path: token
+authorization_tests:
+- name: post-resource-access
+  request:
+    method: GET
+    url: http://localhost:5001/resource
+    headers:
+      Authorization: Bearer {{access_token}}
+  expectations:
+    allowed_users:
+    - alice
+    - bob

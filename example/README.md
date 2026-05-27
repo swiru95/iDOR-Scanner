@@ -34,35 +34,35 @@ python -m pip install flask
 python example/flask_idor_demo.py
 ```
 
-In a second terminal, run the scanner with the included config:
+The example configs are YAML, so install PyYAML first (`pip install pyyaml`). The scanner also accepts JSON configs with no extra dependency.
+
+In a second terminal, run the scanner with one of the included configs:
 
 ```bash
-python idor_scanner.py --config example/flask_idor_demo_config.json
+python idor_scanner.py --config example/ci_flask_demo_config.yaml
 ```
 
 The expected result is that the scanner reports the intentional broken-access examples while the other routes follow the declared role expectations.
 
 ## Included config variants
 
-- `example/flask_idor_demo_config.json` uses the login flow and extracts tokens from `/auth/login`.
-- `example/flask_idor_demo_config_ollama.json` is the same demo config but also asks for an LLM summary from `https://ollama.kscsc.local` using `llama3.1`.
-- `example/flask_idor_demo_config_tokens_only.json` skips `login_sequence` entirely and uses per-user bearer tokens in `users[].headers`.
-- `example/flask_idor_demo_config_openapi.json` derives authorization tests from `example/flask_idor_demo_openapi.json`.
-- `example/flask_idor_demo_config_burp_history.json` derives authorization tests from Burp-history-style requests listed in config.
-- `example/flask_idor_demo_config_burp_mcp.json` sends scanner traffic through Burp MCP at `http://127.0.0.1:9876/`.
-- `example/flask_idor_demo_config_burp_mcp_openapi.json` derives tests from OpenAPI and routes traffic through Burp MCP.
+- `example/ci_flask_demo_config.yaml` uses an explicit `login_sequence` to extract tokens from `/auth/login`, then runs expectation-based authorization tests.
+- `example/ci_flask_demo_openapi_config.yaml` derives authorization tests from `example/flask_idor_demo_openapi.json` and tunes them with operation-specific path-param defaults (`openapi_operation_path_param_defaults`), expectation overrides (`openapi_expectation_overrides`), and operation filtering (`openapi_exclude_operation_ids`).
 
-The combined OpenAPI config also demonstrates endpoint-specific defaults via `openapi_path_param_defaults`, operation-specific overrides via `openapi_operation_path_param_defaults`, expectation tuning with `openapi_expectation_overrides`, and filtering with `openapi_exclude_operation_ids`.
+Both configs are the ones exercised by the DAST job in CI, so they are kept working against the demo target.
 
 Run any variant with:
 
 ```bash
-python idor_scanner.py --config /absolute/path/to/example/<config-file>.json
+python idor_scanner.py --config /absolute/path/to/example/<config-file>.yaml
 ```
 
-The token-only config uses demo tokens derived from the Flask app's intentionally unsigned local token format, so it is suitable only for this sample target. Those tokens are readable client-side and are not production-safe.
+Two additional demo targets live in their own folders, each with matching configs and an OpenAPI spec:
 
-For internal TLS certificates, set `ollama_ca_bundle_path` in config so Python can validate `https://ollama.kscsc.local`.
+- `example/oidc-http/` — an OIDC-style login flow (includes a YAML config variant).
+- `example/post-http/` — a form/JSON POST login flow.
+
+For internal TLS certificates, set `ollama_ca_bundle_path` in config so Python can validate an HTTPS Ollama endpoint.
 
 Burp MCP note:
 

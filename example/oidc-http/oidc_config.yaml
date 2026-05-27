@@ -1,0 +1,39 @@
+users:
+- name: alice
+  variables:
+    username: alice
+    password: password1
+- name: bob
+  variables:
+    username: bob
+    password: password2
+login_sequence:
+- request:
+    method: GET
+    url: http://localhost:5000/authorize?client_id=demo-client&redirect_uri=http://localhost:5000/callback&response_type=code&scope=openid&state=xyz&username={{username}}&password={{password}}
+  extract:
+    auth_code:
+      from: header
+      name: Location
+      pattern: code=([a-f0-9\-]+)
+- request:
+    method: POST
+    url: http://localhost:5000/token
+    body: code={{auth_code}}&client_id=demo-client&redirect_uri=http://localhost:5000/callback&grant_type=authorization_code
+    headers:
+      Content-Type: application/x-www-form-urlencoded
+  extract:
+    access_token:
+      from: json
+      path: access_token
+authorization_tests:
+- name: oidc-resource-access
+  request:
+    method: GET
+    url: http://localhost:5000/resource
+    headers:
+      Authorization: Bearer {{access_token}}
+  expectations:
+    allowed_users:
+    - alice
+    - bob

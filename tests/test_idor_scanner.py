@@ -26,7 +26,13 @@ class FakeExecutor:
 
     def send(self, request_spec):
         self.calls.append(request_spec)
-        return self.responses[len(self.calls) - 1]
+        index = len(self.calls) - 1
+        # run_authorization_tests issues one extra unauthenticated request per
+        # test beyond the per-user calls; reuse the last response for those so
+        # tests only need to enumerate the responses they assert on.
+        if index >= len(self.responses):
+            return self.responses[-1]
+        return self.responses[index]
 
 
 class TestIDORScannerHelpers(unittest.TestCase):
@@ -519,6 +525,30 @@ class TestIDORScannerHelpers(unittest.TestCase):
         self.assertEqual(findings["risk"], "medium")
         self.assertIn("full_body", findings["details"]["alice"])
         self.assertIn("full_body", findings["details"]["bob"])
+
+    def test_evaluate_heuristic_ignores_unauthenticated_in_cross_user_comparison(self):
+        findings = evaluate_test_results(
+            "different-bodies-with-anon",
+            {
+                "alice": HTTPResult(200, {}, '{"owner": "alice"}'),
+                "bob": HTTPResult(200, {}, '{"owner": "bob"}'),
+                "unauthenticated": HTTPResult(401, {}, "denied"),
+            },
+        )
+        self.assertEqual(findings["finding"], "possible_cross_user_data_leak")
+        self.assertEqual(findings["risk"], "medium")
+
+    def test_evaluate_heuristic_flags_unauthenticated_success_as_high(self):
+        findings = evaluate_test_results(
+            "public-when-it-should-not-be",
+            {
+                "alice": HTTPResult(200, {}, '{"id": 1}'),
+                "bob": HTTPResult(403, {}, "forbidden"),
+                "unauthenticated": HTTPResult(200, {}, '{"id": 1}'),
+            },
+        )
+        self.assertEqual(findings["finding"], "possible_idor_or_broken_access_control")
+        self.assertEqual(findings["risk"], "high")
 
     def test_evaluate_body_preview_length_is_500(self):
         long_body = "x" * 1000

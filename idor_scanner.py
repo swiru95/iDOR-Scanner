@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 TEMPLATE_PATTERN = r"\{\{\s*([a-zA-Z0-9_\.\-]+)\s*\}\}"
 OPENAPI_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+UNAUTHENTICATED_USER = "unauthenticated"
 
 
 def _build_ssl_context(verify: bool, ca_bundle_path: str) -> Optional[ssl.SSLContext]:
@@ -58,11 +59,17 @@ class DirectHTTPExecutor(RequestExecutor):
         headers = {k: str(v) for k, v in request_spec.get("headers", {}).items()}
         body_data = _encode_body(request_spec, headers)
         req = urllib.request.Request(url=url, data=body_data, headers=headers, method=method)
+        # Custom opener to prevent automatic redirect following
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(NoRedirect)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_seconds, context=self._ssl_context) as resp:
+            with opener.open(req, timeout=self.timeout_seconds) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 return HTTPResult(status=resp.status, headers=dict(resp.headers.items()), body=body)
         except urllib.error.HTTPError as e:
+            # For 3xx, still return headers (e.g., Location)
             body = e.read().decode("utf-8", errors="replace")
             return HTTPResult(status=e.code, headers=dict(e.headers.items()), body=body)
 
@@ -323,7 +330,12 @@ def _apply_user_headers(request_spec: Dict[str, Any], user: Dict[str, Any], cont
 def extract_value(result: HTTPResult, rule: Dict[str, str]) -> str:
     source = rule.get("from", "json")
     if source == "header":
-        return result.headers.get(rule["name"], "")
+        header_val = result.headers.get(rule["name"], "")
+        pattern = rule.get("pattern")
+        if pattern:
+            match = re.search(pattern, header_val)
+            return match.group(1) if match else ""
+        return header_val
     if source == "set_cookie":
         cookie_name = rule.get("name", "")
         raw = result.headers.get("Set-Cookie", "")
@@ -412,21 +424,33 @@ def evaluate_test_results(test_name: str, user_results: Dict[str, HTTPResult], e
             finding = "unexpected_authorization_or_application_behavior"
             risk = "medium"
     else:
-        all_success = all(_is_success(r.status) for r in user_results.values())
-        if all_success and len(user_results) > 1:
-            hashes = {r.body_hash for r in user_results.values()}
+        # The anonymous probe must not pollute the cross-user comparison: its
+        # 401 would otherwise make "all users succeeded" perpetually false. Judge
+        # authenticated users among themselves, then assess the anon probe alone.
+        anon_result = user_results.get(UNAUTHENTICATED_USER)
+        real_results = {u: r for u, r in user_results.items() if u != UNAUTHENTICATED_USER}
+        notes = []
+
+        all_success = bool(real_results) and all(_is_success(r.status) for r in real_results.values())
+        if all_success and len(real_results) > 1:
+            hashes = {r.body_hash for r in real_results.values()}
             if len(hashes) == 1:
                 finding = "possible_idor_identical_successful_access"
                 risk = "medium"
-                notes = ["All tested users received successful and identical responses."]
+                notes.append("All tested users received successful and identical responses.")
             else:
                 finding = "possible_cross_user_data_leak"
                 risk = "medium"
-                notes = ["All users got successful responses but with different content; may indicate cross-user data access. Full bodies included for LLM analysis."]
-                for user, result in user_results.items():
+                notes.append("All users got successful responses but with different content; may indicate cross-user data access. Full bodies included for LLM analysis.")
+                for user, result in real_results.items():
                     details[user]["full_body"] = result.body
         else:
-            notes = ["Differences detected or non-success responses observed."]
+            notes.append("Differences detected or non-success responses observed.")
+
+        if anon_result is not None and _is_success(anon_result.status):
+            notes.append(f"Unauthenticated request succeeded with {anon_result.status}; endpoint may be missing authentication.")
+            finding = "possible_idor_or_broken_access_control"
+            risk = "high"
 
     return {
         "test": test_name,
@@ -463,6 +487,7 @@ def authenticate_users(config: Dict[str, Any], executor: RequestExecutor) -> Dic
 def run_authorization_tests(config: Dict[str, Any], user_contexts: Dict[str, Dict[str, Any]], executor: RequestExecutor) -> List[Dict[str, Any]]:
     findings = []
     users = config.get("users", [])
+    shared = config.get("shared_variables", {})
     max_workers = int(config.get("max_concurrent_requests", 5))
 
     for test in config.get("authorization_tests", []):
@@ -477,6 +502,19 @@ def run_authorization_tests(config: Dict[str, Any], user_contexts: Dict[str, Dic
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             for user_name, result in pool.map(_run_for_user, users):
                 per_user_results[user_name] = result
+
+        # Add unauthenticated test: render against shared variables only (no
+        # per-user token) and drop every credential-bearing header so the probe
+        # is genuinely anonymous.
+        anon_request = render_template(copy.deepcopy(test["request"]), dict(shared))
+        anon_headers = anon_request.get("headers")
+        if isinstance(anon_headers, dict):
+            for header_name in [h for h in anon_headers if h.lower() in {"authorization", "cookie"}]:
+                del anon_headers[header_name]
+            if not anon_headers:
+                del anon_request["headers"]
+        anon_result = executor.send(anon_request)
+        per_user_results[UNAUTHENTICATED_USER] = anon_result
 
         finding = evaluate_test_results(
             test_name=test.get("name", "unnamed_test"),
@@ -523,7 +561,7 @@ def maybe_generate_llm_summary(config: Dict[str, Any], report: Dict[str, Any]) -
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, context=ssl_context) as resp:
+        with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             summary = data.get("response")
             if summary:
@@ -913,20 +951,21 @@ def _build_authorization_tests_from_openapi(
 
 def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(config.get("instruction_prompt", "")).strip()
-    if not prompt:
-        return config
+    inferred = _extract_prompt_instruction(prompt) if prompt else {}
 
-    inferred = _extract_prompt_instruction(prompt)
-    users = config.get("users", [])
-    expected_count = inferred.get("users_count")
-    if expected_count is not None and expected_count != len(users):
-        provided_count = len(users)
-        provided_label = "user" if provided_count == 1 else "users"
-        raise ValueError(
-            f"instruction_prompt expects {expected_count} users but 'users' field contains {provided_count} {provided_label}"
-        )
+    if prompt:
+        users = config.get("users", [])
+        expected_count = inferred.get("users_count")
+        if expected_count is not None and expected_count != len(users):
+            provided_count = len(users)
+            provided_label = "user" if provided_count == 1 else "users"
+            raise ValueError(
+                f"instruction_prompt expects {expected_count} users but 'users' field contains {provided_count} {provided_label}"
+            )
 
-    if not config.get("login_sequence"):
+    # Login-sequence derivation needs the natural-language prompt (LLM or regex);
+    # without one, callers supply an explicit login_sequence or per-user headers.
+    if prompt and not config.get("login_sequence"):
         user_variable_names = list({
             key
             for user in config.get("users", [])
@@ -977,7 +1016,17 @@ def apply_prompt_instruction_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        config = json.load(f)
+        if path.endswith(".yaml") or path.endswith(".yml"):
+            try:
+                import yaml
+            except ImportError as exc:
+                raise ValueError(
+                    "YAML configs require PyYAML (pip install pyyaml); "
+                    "use a JSON config to stay dependency-free"
+                ) from exc
+            config = yaml.safe_load(f)
+        else:
+            config = json.load(f)
     return apply_prompt_instruction_defaults(config)
 
 

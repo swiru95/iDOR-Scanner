@@ -194,6 +194,10 @@ Both sources can be combined with an `instruction_prompt` so the scanner derives
 Request timeout can be tuned with `http_timeout_seconds` (defaults to `20`).
 For internal TLS endpoints, set `ollama_ca_bundle_path` to a PEM bundle trusted for `ollama_url`.
 
+### Configuration format
+
+Configs may be written in **YAML** (`.yaml` / `.yml`) or **JSON** (`.json`); the format is selected by file extension. The bundled example configs are YAML, which requires PyYAML (`pip install pyyaml`). JSON configs need no third-party dependencies — the rest of the tool is pure standard library. The examples below are shown in JSON, but the same keys apply to YAML.
+
 Run:
 
 ```bash
@@ -215,7 +219,7 @@ python idor_scanner.py --config config.json --instruction "go to login.example.c
 ### Prompt-driven defaults
 
 If `instruction_prompt` is present and `login_sequence` is missing, the scanner derives a login step automatically. When `ollama_url` and `ollama_model` are also set, it sends the prompt to Ollama and uses the model's output as the `login_sequence` — enabling natural-language descriptions of arbitrary login flows (multi-step, token exchange, OAuth, cookie-based). If the Ollama call fails or returns unparseable output, the scanner falls back to a simple regex-based heuristic and prints a warning to stderr.
-If `authorization_tests` is missing and `openapi_spec` or `openapi_spec_path` is provided, tests are derived from OpenAPI operations first.
+If `authorization_tests` is missing and `openapi_spec` or `openapi_spec_path` is provided, tests are derived from OpenAPI operations first. (This generation does not require `instruction_prompt` — it runs whenever `authorization_tests` is absent and a source is available.)
 If `authorization_tests` is missing and no OpenAPI source is provided, `burp_history_requests` (or `burp_mcp_history_requests`) is used and tests are derived from those requests with an injected `Authorization: Bearer {{access_token}}` header (when absent).
 If you already have per-user credentials or tokens, `login_sequence` can be omitted and each user can define request `headers` applied to every request for that user.
 If the prompt declares `use these N users`, the scanner validates that the config contains exactly `N` users.
@@ -354,24 +358,55 @@ Per-user header example without login sequence:
 }
 ```
 
-A ready-to-run token-only demo config is also included at `example/flask_idor_demo_config_tokens_only.json`.
-
 ## Local Flask example target
 
 A runnable demo target is available in `example/`.
 
 - `example/flask_idor_demo.py` starts a Flask server with 3 users (`admin`, `editor`, `viewer`), 13 example endpoints, and 3 intentional broken-access flaws.
-- `example/flask_idor_demo_config.json` is a ready-to-run scanner configuration for that demo server.
-- `example/flask_idor_demo_config_ollama.json` adds an Ollama-backed summary using `https://ollama.kscsc.local`.
-- `example/flask_idor_demo_config_llm_login.json` demonstrates LLM-generated login sequences: omits `login_sequence` and lets Ollama synthesise it from `instruction_prompt`, then tests all 15 endpoints including three additional invoice ownership tests not present in other configs.
-- `example/flask_idor_demo_config_tokens_only.json` shows a no-login configuration that uses only per-user bearer tokens for the local demo app.
-- `example/flask_idor_demo_config_openapi.json` demonstrates deriving tests from `example/flask_idor_demo_openapi.json`.
-- `example/flask_idor_demo_config_burp_history.json` demonstrates deriving tests from Burp-history-style requests.
-- `example/flask_idor_demo_config_burp_mcp.json` demonstrates routing scanner traffic through Burp MCP SSE (`http://127.0.0.1:9876/`).
-- `example/flask_idor_demo_config_burp_mcp_openapi.json` demonstrates OpenAPI-derived tests executed through Burp MCP SSE.
+- `example/flask_idor_demo_openapi.json` is the OpenAPI 3.0 document for the demo, used for spec-driven test generation.
+- `example/ci_flask_demo_config.yaml` is a ready-to-run config with an explicit `login_sequence` and expectation-based authorization tests (exercised by the DAST job in CI).
+- `example/ci_flask_demo_openapi_config.yaml` derives tests from the OpenAPI spec and tunes them with `openapi_expectation_overrides` / `openapi_exclude_operation_ids` (also exercised in CI).
+- `example/oidc-http/` is a separate OIDC-style login demo target with its own configs (including a YAML config) and OpenAPI spec.
+- `example/post-http/` is a POST-login demo target with its own configs and OpenAPI spec.
 - `example/README.md` explains how to run the sample locally.
 
 The demo app also exposes `GET /` as a crawl-friendly landing page and `GET /openapi.json` for local OpenAPI testing.
 
 If Ollama summarization fails, the report now includes `llm_summary_error` with a short error message.
 When using HTTPS with internal certificates, set `ollama_ca_bundle_path` to the CA chain file (PEM).
+
+## Unauthenticated (Anonymous) Testing
+
+**Automatic unauthenticated checks:**
+
+As of the latest version, iDOR-Scanner automatically tests every endpoint in your `authorization_tests` (or OpenAPI-derived tests) both with and without authentication:
+
+- For each test, the scanner sends requests as every configured user (with their credentials/tokens) **and** as an unauthenticated (anonymous) user (no Authorization header).
+- The results include a special `unauthenticated` entry for each test, showing the status and response for anonymous access.
+- This allows you to easily spot endpoints that are accessible without authentication, even if you expected them to be protected.
+
+**How it works:**
+- If an endpoint is public, the `unauthenticated` result will show a 200 (or other success code), and the scanner will flag this as a possible access control issue if the endpoint was expected to be protected.
+- If an endpoint is protected, the `unauthenticated` result will show a 401/403 (or similar), confirming that authentication is required.
+
+**No config changes needed:**
+- This behavior is enabled by default. You do not need to add extra tests for anonymous access—the scanner does it for you automatically.
+
+**Example finding:**
+
+```json
+{
+  "test": "service3-public",
+  "details": {
+    "admin_user": {"status": 200, ...},
+    "editor_user": {"status": 200, ...},
+    "viewer_user": {"status": 200, ...},
+    "unauthenticated": {"status": 200, ...}
+  },
+  "notes": [
+    "unauthenticated should not be allowed but got 200"
+  ]
+}
+```
+
+This makes it easy to spot unprotected endpoints and verify that your API enforces authentication as expected.
