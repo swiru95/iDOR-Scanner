@@ -1,6 +1,31 @@
 # iDOR-Scanner
 Zero-dependency Python CLI for automated broken object-level authorization (BOLA/IDOR) testing across multiple user roles. Deterministic authorization checks at the core, with a local LLM (Ollama) available as a second-opinion layer for login sequence generation, per-finding response analysis, and report summarisation — no cloud, no telemetry.
 
+## Installation
+
+The scanner runs directly from a checkout with no install step — the core is pure standard library:
+
+```bash
+python idor_scanner.py --config config.json
+```
+
+To get an `idor-scanner` command on your PATH, install it with [pipx](https://pipx.pypa.io/) (recommended, isolated venv) or pip:
+
+```bash
+pipx install .            # core only (JSON configs, zero dependencies)
+pipx install '.[yaml]'    # add PyYAML so YAML configs work
+# or, with pip:
+pip install '.[yaml]'
+```
+
+Then run it from anywhere:
+
+```bash
+idor-scanner --config config.yaml --output report.json
+```
+
+`idor-scanner` and `python idor_scanner.py` accept identical arguments. PyYAML is the only optional dependency — pulled in by the `[yaml]` extra and needed only for YAML-formatted configs; JSON configs need nothing beyond the standard library. Flask is required solely to run the bundled demo target (`example/`). Uninstall cleanly with `pipx uninstall idor-scanner`.
+
 ## Architecture
 
 ### Overview
@@ -410,3 +435,7 @@ As of the latest version, iDOR-Scanner automatically tests every endpoint in you
 ```
 
 This makes it easy to spot unprotected endpoints and verify that your API enforces authentication as expected.
+
+## Claude Code skill
+
+The repo ships a [Claude Code](https://claude.com/claude-code) skill at `.claude/skills/idor-scan/` so you can delegate scans to an agent during an engagement. With the project open in Claude Code, invoke it with `/idor-scan` or just describe the target in plain English (e.g. *"scan the API at app.example.com for IDOR with these three users"*). The skill knows the config schema, the three input modes (plain-English login, OpenAPI spec, Burp history/MCP), how to auto-detect a local Ollama, and how to triage `report.json` — it builds the config, runs the scanner, and summarises findings for you.

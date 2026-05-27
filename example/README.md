@@ -42,6 +42,12 @@ In a second terminal, run the scanner with one of the included configs:
 python idor_scanner.py --config example/ci_flask_demo_config.yaml
 ```
 
+If you installed the CLI (`pipx install '.[yaml]'`, see the top-level README), the equivalent is:
+
+```bash
+idor-scanner --config example/ci_flask_demo_config.yaml
+```
+
 The expected result is that the scanner reports the intentional broken-access examples while the other routes follow the declared role expectations.
 
 ## Included config variants
